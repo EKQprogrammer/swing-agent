@@ -53,11 +53,31 @@ class FundamentalConfig:
 
 
 @dataclass
+class TechnicalConfig:
+    ema_fast: int = 20
+    ema_slow: int = 50
+    rsi_period: int = 14
+    atr_period: int = 14
+    atr_stop_multiplier: float = 2.0
+    volume_avg_window: int = 20
+    pullback_tolerance_pct: float = 1.5
+    breakout_min_days: int = 15
+    breakout_max_days: int = 40
+    breakout_width_min_pct: float = 5.0
+    breakout_width_max_pct: float = 15.0
+    breakout_volume_multiplier: float = 1.5
+    failed_breakdown_support_window: int = 20
+    failed_breakdown_volume_multiplier: float = 1.5
+    failed_breakdown_recovery_days: int = 2
+
+
+@dataclass
 class Config:
     account: AccountConfig = field(default_factory=AccountConfig)
     macro_regime: MacroRegimeConfig = field(default_factory=MacroRegimeConfig)
     data: DataConfig = field(default_factory=DataConfig)
     fundamental: FundamentalConfig = field(default_factory=FundamentalConfig)
+    technical: TechnicalConfig = field(default_factory=TechnicalConfig)
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:
@@ -75,5 +95,12 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     macro_regime = MacroRegimeConfig(**raw.get("macro_regime", {}))
     data = DataConfig(**raw.get("data", {}))
     fundamental = FundamentalConfig(**raw.get("fundamental", {}))
+    technical = TechnicalConfig(**raw.get("technical", {}))
 
-    return Config(account=account, macro_regime=macro_regime, data=data, fundamental=fundamental)
+    return Config(
+        account=account,
+        macro_regime=macro_regime,
+        data=data,
+        fundamental=fundamental,
+        technical=technical,
+    )

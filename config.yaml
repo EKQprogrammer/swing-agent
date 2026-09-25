@@ -38,3 +38,20 @@ fundamental:
     - JPM
     - JNJ
     - PG
+
+technical:
+  ema_fast: 20
+  ema_slow: 50
+  rsi_period: 14
+  atr_period: 14
+  atr_stop_multiplier: 2.0
+  volume_avg_window: 20
+  pullback_tolerance_pct: 1.5
+  breakout_min_days: 15
+  breakout_max_days: 40
+  breakout_width_min_pct: 5.0
+  breakout_width_max_pct: 15.0
+  breakout_volume_multiplier: 1.5
+  failed_breakdown_support_window: 20
+  failed_breakdown_volume_multiplier: 1.5
+  failed_breakdown_recovery_days: 2
