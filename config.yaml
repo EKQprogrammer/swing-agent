@@ -1,0 +1,12 @@
+account:
+  account_size: 10000
+  risk_per_trade_pct: 1.0
+  max_positions: 6
+  max_sector_pct: 30
+
+data:
+  db_path: data/swing.db
+  price_history_years: 3
+  tickers:
+    - SPY
+    - "^VIX"
