@@ -65,13 +65,29 @@ with st.sidebar:
     refresh_clicked = st.button("Refresh scan", type="primary")
 
 if refresh_clicked:
+    # Every external call below is isolated in its own try/except: this runs
+    # on a cloud network path (unlike local dev), where a single slow/failed
+    # request (FRED, yfinance) must not take down the whole page. DGS10 is
+    # informational-only in get_macro_regime, so skipping it on failure is safe.
+    fetch_warnings = []
     with st.spinner("Refreshing macro + watchlist data and re-evaluating..."):
         for ticker in cfg.data.tickers:
-            fetch_and_store_prices(conn, ticker, period=f"{cfg.data.price_history_years}y")
-        fetch_and_store_macro_series(conn, "DGS10")
+            try:
+                fetch_and_store_prices(conn, ticker, period=f"{cfg.data.price_history_years}y")
+            except Exception as exc:
+                fetch_warnings.append(f"Price fetch failed for {ticker}: {exc}")
+
+        try:
+            fetch_and_store_macro_series(conn, "DGS10")
+        except Exception as exc:
+            fetch_warnings.append(f"10Y yield (DGS10) fetch failed, continuing without it: {exc}")
+
         for ticker in watchlist:
             if ticker not in cfg.data.tickers:
-                fetch_and_store_prices(conn, ticker, period=f"{cfg.data.price_history_years}y")
+                try:
+                    fetch_and_store_prices(conn, ticker, period=f"{cfg.data.price_history_years}y")
+                except Exception as exc:
+                    fetch_warnings.append(f"Price fetch failed for {ticker}: {exc}")
 
         results = []
         for ticker in watchlist:
@@ -84,6 +100,12 @@ if refresh_clicked:
                 })
         st.session_state["scan_results"] = results
         st.session_state["scan_watchlist"] = watchlist
+        st.session_state["fetch_warnings"] = fetch_warnings
+
+if st.session_state.get("fetch_warnings"):
+    with st.expander(f"{len(st.session_state['fetch_warnings'])} fetch warning(s) from the last refresh"):
+        for w in st.session_state["fetch_warnings"]:
+            st.warning(w)
 
 st.header("Macro Regime")
 try:
