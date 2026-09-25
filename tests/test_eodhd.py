@@ -52,7 +52,7 @@ def _raw_payload() -> dict:
                     "2021-12-31": {"freeCashFlow": "90000000"},
                     "2022-12-31": {  # no direct freeCashFlow -> exercises the OCF-capex fallback
                         "totalCashFromOperatingActivities": "150000000",
-                        "capitalExpenditures": "-30000000",
+                        "capitalExpenditures": "30000000",  # EODHD stores capex as a positive magnitude
                     },
                     "2023-12-31": {"freeCashFlow": "130000000"},
                 }
@@ -87,7 +87,7 @@ def test_compute_metrics_series_growth_and_fcf(memory_conn: sqlite3.Connection) 
     # 2022: (1100-1000)/1000*100 = 10%, (120-100)/100*100 = 20%
     assert y2022["revenue_growth_yoy"] == pytest.approx(10.0)
     assert y2022["earnings_growth_yoy"] == pytest.approx(20.0)
-    # FCF fallback: OCF + capex(already negative) = 150M + (-30M) = 120M
+    # FCF fallback: OCF - capex(positive magnitude) = 150M - 30M = 120M
     assert y2022["fcf"] == pytest.approx(120_000_000)
     assert y2022["fcf_margin"] == pytest.approx(120_000_000 / 1_100_000_000 * 100)
 
@@ -119,6 +119,24 @@ def test_point_in_time_price_lookup(memory_conn: sqlite3.Connection) -> None:
     assert all(row["avg_daily_volume"] == pytest.approx(1_000_000) for row in series)
     # prices are monotonically increasing in the fixture, and filed_dates are ascending
     assert series[0]["price"] < series[1]["price"] < series[2]["price"]
+
+
+def test_fcf_fallback_subtracts_positive_capex(memory_conn: sqlite3.Connection) -> None:
+    """Discriminating regression test: OCF and capex chosen so ocf-capex !=
+    ocf+capex, catching the sign-convention bug found against real EODHD
+    data (capitalExpenditures is a positive magnitude, not a negative
+    outflow like FMP's convention -- confirmed: real AAPL data satisfies
+    ocf - capex == their own reported freeCashFlow exactly)."""
+    raw = {
+        "Financials": {
+            "Income_Statement": {"yearly": {"2022-12-31": {"date": "2022-12-31", "filing_date": "2023-02-01", "totalRevenue": "500000000", "netIncome": "50000000"}}},
+            "Cash_Flow": {"yearly": {"2022-12-31": {"totalCashFromOperatingActivities": "100000000", "capitalExpenditures": "40000000"}}},
+            "Balance_Sheet": {"yearly": {"2022-12-31": {}}},
+        }
+    }
+    series = compute_fundamental_metrics_series(memory_conn, "ACME", raw)
+    # correct: 100M - 40M = 60M. bug would give 100M + 40M = 140M.
+    assert series[0]["fcf"] == pytest.approx(60_000_000)
 
 
 def test_missing_roic_components_yields_none(memory_conn: sqlite3.Connection) -> None:

@@ -130,7 +130,11 @@ def compute_fundamental_metrics_series(conn: sqlite3.Connection, ticker: str, ra
             ocf = _num(cash_flow.get("totalCashFromOperatingActivities"))
             capex = _num(cash_flow.get("capitalExpenditures"))
             if ocf is not None and capex is not None:
-                fcf = ocf + capex  # EODHD stores capex as a negative outflow already
+                # EODHD stores capitalExpenditures as a POSITIVE magnitude
+                # (confirmed against real AAPL data: ocf - capex == their
+                # own reported freeCashFlow exactly), unlike FMP's
+                # convention of storing it as a negative outflow.
+                fcf = ocf - capex
         fcf_margin = fcf / revenue * 100 if fcf is not None and revenue else None
 
         ebit = _num(income.get("ebit"))
