@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from dotenv import load_dotenv
 
 from swing_agent.data.fundamentals import (
     compute_fundamental_metrics,
@@ -12,11 +13,11 @@ from swing_agent.data.fundamentals import (
 
 def _raw_payload() -> dict:
     return {
-        "profile": {"price": 150.0, "volAvg": 25_000_000},
+        "profile": {"price": 150.0, "averageVolume": 25_000_000},
         "income_current": {"date": "2025-12-31", "revenue": 1_100_000_000, "netIncome": 220_000_000},
         "income_prior": {"date": "2024-12-31", "revenue": 1_000_000_000, "netIncome": 200_000_000},
         "cash_flow": {"freeCashFlow": 150_000_000},
-        "key_metrics": {"roicTTM": 0.18},
+        "key_metrics": {"returnOnInvestedCapitalTTM": 0.18},
     }
 
 
@@ -35,7 +36,7 @@ def test_compute_fundamental_metrics_happy_path() -> None:
 
 def test_compute_fundamental_metrics_missing_field_falls_back_to_none() -> None:
     raw = _raw_payload()
-    del raw["key_metrics"]["roicTTM"]
+    del raw["key_metrics"]["returnOnInvestedCapitalTTM"]
     metrics = compute_fundamental_metrics("ACME", raw)
     assert metrics["roic"] is None
     # Other metrics still computed despite the missing field.
@@ -51,6 +52,8 @@ def test_compute_fundamental_metrics_zero_prior_revenue_guards_division() -> Non
 
 @pytest.mark.live
 def test_fetch_raw_fundamentals_live() -> None:
+    load_dotenv()  # loaded explicitly here so this test's skip/run doesn't
+    # depend on test execution order triggering it as another test's side effect
     api_key = os.environ.get("FMP_API_KEY", "")
     if not api_key:
         pytest.skip("FMP_API_KEY not set")

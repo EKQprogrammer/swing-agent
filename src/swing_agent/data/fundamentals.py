@@ -8,7 +8,7 @@ from swing_agent.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 
 
 class FundamentalsFetchError(RuntimeError):
@@ -16,9 +16,12 @@ class FundamentalsFetchError(RuntimeError):
     incomplete/unexpected response for a ticker."""
 
 
-def _fmp_get(endpoint: str, api_key: str, **params) -> list | dict:
+def _fmp_get(endpoint: str, api_key: str, symbol: str, **params) -> list | dict:
+    # FMP's current free-tier surface is the /stable/ namespace, which takes
+    # the ticker as a `symbol` query param rather than a path segment (the
+    # older /api/v3/ path-style endpoints return 403 on this plan).
     url = f"{FMP_BASE_URL}/{endpoint}"
-    resp = requests.get(url, params={**params, "apikey": api_key}, timeout=30)
+    resp = requests.get(url, params={**params, "symbol": symbol, "apikey": api_key}, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -32,10 +35,10 @@ def fetch_raw_fundamentals(ticker: str, api_key: str) -> dict:
     if not api_key:
         raise FundamentalsFetchError("FMP_API_KEY is not set; cannot fetch fundamentals.")
 
-    profile = _fmp_get(f"profile/{ticker}", api_key)
-    income = _fmp_get(f"income-statement/{ticker}", api_key, period="annual", limit=2)
-    cash_flow = _fmp_get(f"cash-flow-statement/{ticker}", api_key, period="annual", limit=1)
-    key_metrics = _fmp_get(f"key-metrics-ttm/{ticker}", api_key)
+    profile = _fmp_get("profile", api_key, ticker)
+    income = _fmp_get("income-statement", api_key, ticker, period="annual", limit=2)
+    cash_flow = _fmp_get("cash-flow-statement", api_key, ticker, period="annual", limit=1)
+    key_metrics = _fmp_get("key-metrics-ttm", api_key, ticker)
 
     if not profile or not income or len(income) < 2 or not cash_flow or not key_metrics:
         raise FundamentalsFetchError(f"Incomplete FMP data for ticker={ticker!r}")
@@ -82,8 +85,9 @@ def compute_fundamental_metrics(ticker: str, raw: dict) -> dict:
     fcf = cash_flow.get("freeCashFlow")
     fcf_margin = fcf / revenue_cur * 100 if fcf is not None and revenue_cur else None
 
-    # FMP returns roicTTM as a decimal fraction (e.g. 0.15), not a percent.
-    roic = key_metrics.get("roicTTM")
+    # FMP's /stable/key-metrics-ttm returns returnOnInvestedCapitalTTM as a
+    # decimal fraction (e.g. 0.15), not a percent.
+    roic = key_metrics.get("returnOnInvestedCapitalTTM")
     if roic is not None:
         roic = roic * 100
 
@@ -96,7 +100,7 @@ def compute_fundamental_metrics(ticker: str, raw: dict) -> dict:
         "revenue_growth_yoy": revenue_growth_yoy,
         "earnings_growth_yoy": earnings_growth_yoy,
         "price": profile.get("price"),
-        "avg_daily_volume": profile.get("volAvg"),
+        "avg_daily_volume": profile.get("averageVolume"),
     }
 
 
