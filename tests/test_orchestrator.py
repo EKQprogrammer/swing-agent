@@ -77,6 +77,26 @@ def _fake_fetch(metrics: dict):
     return fetch_fn
 
 
+def _disable_pivot_proximity(monkeypatch) -> None:
+    """These tests exercise the orchestrator's layer-chaining logic, not the
+    (already separately, directly tested) pivot-proximity gate -- disable it
+    so fixtures built before that gate existed don't incidentally depend on
+    where pivots happen to land. get_verdict() reads cfg.fundamental/cfg.risk
+    from orchestrator.py's own load_config, but the technical layer it calls
+    (get_technical_signal) reads cfg.technical from technical.py's own
+    load_config -- both must be patched."""
+    import dataclasses
+    from swing_agent.config import load_config as real_load_config
+
+    def patched(*a, **k):
+        cfg = real_load_config(*a, **k)
+        cfg.technical = dataclasses.replace(cfg.technical, pivot_proximity_enabled=False)
+        return cfg
+
+    monkeypatch.setattr("swing_agent.agents.orchestrator.load_config", patched)
+    monkeypatch.setattr("swing_agent.agents.technical.load_config", patched)
+
+
 def test_reject_at_macro_layer(memory_conn: sqlite3.Connection) -> None:
     _seed_spy(memory_conn, bullish=False)
     result = get_verdict(memory_conn, "XYZ", fetch_fn=_fake_fetch(STRONG_METRICS))
@@ -104,7 +124,8 @@ def test_reject_at_technical_layer(memory_conn: sqlite3.Connection) -> None:
     assert result["technical"]["verdict"] == "NO_SETUP"
 
 
-def test_approve_full_chain(memory_conn: sqlite3.Connection) -> None:
+def test_approve_full_chain(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _disable_pivot_proximity(monkeypatch)
     _seed_spy(memory_conn, bullish=True)
     _seed_ticker(memory_conn, "XYZ", trigger_pullback=True)
     result = get_verdict(memory_conn, "XYZ", fetch_fn=_fake_fetch(STRONG_METRICS))
@@ -114,7 +135,8 @@ def test_approve_full_chain(memory_conn: sqlite3.Connection) -> None:
     assert result["risk"]["shares"] > 0
 
 
-def test_reject_at_risk_layer_when_max_positions_reached(memory_conn: sqlite3.Connection) -> None:
+def test_reject_at_risk_layer_when_max_positions_reached(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _disable_pivot_proximity(monkeypatch)
     _seed_spy(memory_conn, bullish=True)
     _seed_ticker(memory_conn, "XYZ", trigger_pullback=True)
     result = get_verdict(

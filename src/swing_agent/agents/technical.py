@@ -135,6 +135,20 @@ def _initial_stop(entry: float, setup_low: float, atr: float, cfg) -> float:
     return max(setup_low, atr_stop)
 
 
+def _passes_pivot_proximity(entry: float, pivot_s1: float | None, atr: float | None, cfg) -> bool:
+    """Tier 1 item A, gated by pivot_proximity_enabled: requires the entry
+    to be within pivot_proximity_atr_max ATRs of the weekly pivot S1
+    support. Train-period backtest evidence -- see TechnicalConfig's
+    comment. Passes trivially (True) when the filter is off, or when pivot/
+    ATR data isn't available yet (early history) so it never masks as a
+    silent rejection for an unrelated data-availability reason."""
+    if not cfg.pivot_proximity_enabled:
+        return True
+    if pivot_s1 is None or atr is None or atr <= 0:
+        return True
+    return abs(entry - pivot_s1) / atr <= cfg.pivot_proximity_atr_max
+
+
 # --- setup detection -----------------------------------------------------------
 
 
@@ -347,6 +361,11 @@ def get_technical_signal(
         or _detect_breakout(df, cfg)
         or _detect_failed_breakdown(df, cfg)
     )
+    if match is not None and not _passes_pivot_proximity(
+        match["entry"], float(today["pivot_s1"]) if pd.notna(today["pivot_s1"]) else None,
+        float(today["atr"]) if pd.notna(today["atr"]) else None, cfg,
+    ):
+        match = None
 
     result = {
         "ticker": ticker,

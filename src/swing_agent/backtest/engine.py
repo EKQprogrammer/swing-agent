@@ -14,6 +14,7 @@ from swing_agent.agents.technical import (
     _detect_breakout,
     _detect_failed_breakdown,
     _detect_pullback,
+    _passes_pivot_proximity,
     compute_indicators,
 )
 from swing_agent.config import load_config
@@ -83,13 +84,18 @@ def _scan_technical_signal_fast(raw_df: pd.DataFrame, technical_cfg, as_of_date:
         return None
 
     today = indicator_df.iloc[-1]
+    pivot_s1 = float(today["pivot_s1"]) if pd.notna(today["pivot_s1"]) else None
+    atr = float(today["atr"]) if pd.notna(today["atr"]) else None
+    if not _passes_pivot_proximity(match["entry"], pivot_s1, atr, technical_cfg):
+        return None
+
     match["indicators"] = {
         "ema_fast": float(today["ema_fast"]) if pd.notna(today["ema_fast"]) else None,
         "ema_slow": float(today["ema_slow"]) if pd.notna(today["ema_slow"]) else None,
         "rsi": float(today["rsi"]) if pd.notna(today["rsi"]) else None,
-        "atr": float(today["atr"]) if pd.notna(today["atr"]) else None,
+        "atr": atr,
         "pivot_pp": float(today["pivot_pp"]) if pd.notna(today["pivot_pp"]) else None,
-        "pivot_s1": float(today["pivot_s1"]) if pd.notna(today["pivot_s1"]) else None,
+        "pivot_s1": pivot_s1,
         "pivot_r1": float(today["pivot_r1"]) if pd.notna(today["pivot_r1"]) else None,
     }
     return match

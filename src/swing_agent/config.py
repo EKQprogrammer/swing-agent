@@ -98,6 +98,18 @@ class TechnicalConfig:
     # and in the upper half of the day's range (buyers absorbed the panic).
     gap_fade_down_pct: float = 3.0
     gap_fade_volume_multiplier: float = 1.5
+    # Tier 1 item A, ACCEPTED. Train-period diagnostic (2013-2019) showed
+    # entries within 1.5 ATR of the weekly pivot S1 support performing
+    # notably better (n=47: 40.4% win rate, 0.212 avg R) than entries
+    # farther away (n=64: 35.9% win rate, 0.066 avg R) -- unlike items
+    # B/C/D, which contradicted their hypotheses on thin samples. Validated
+    # on train+validation (2013-2022): win rate 39.5%->45.1%, avg R
+    # 0.105R->0.236R (more than doubled), max drawdown 6.0%->3.7%, Sharpe
+    # 0.615->0.751, on 71 trades (still well above the 40-trade floor,
+    # PULLBACK alone reached 52.9% win rate). Clearly passes the acceptance
+    # bar -- the strongest single change found across all refinement work.
+    pivot_proximity_enabled: bool = True
+    pivot_proximity_atr_max: float = 1.5
 
 
 @dataclass

@@ -8,6 +8,7 @@ import pytest
 from swing_agent.agents.technical import (
     TechnicalError,
     _detect_gap_fade,
+    _passes_pivot_proximity,
     compute_indicators,
     get_technical_signal,
     get_volatility_percentile,
@@ -90,7 +91,24 @@ def _seed_flat(conn: sqlite3.Connection, ticker: str = "FLT", n: int = 10) -> No
     upsert_prices(conn, ticker, _price_df(dates, closes, closes, closes, closes, volumes))
 
 
-def test_pullback_setup_detected(memory_conn: sqlite3.Connection) -> None:
+def _disable_pivot_proximity(monkeypatch) -> None:
+    """These tests exercise setup-detection logic itself, not the (already
+    separately, directly tested) pivot-proximity gate -- disable it so
+    fixtures built before that gate existed don't incidentally depend on
+    where pivots happen to land."""
+    import dataclasses
+    from swing_agent.config import load_config as real_load_config
+
+    def patched(*a, **k):
+        cfg = real_load_config(*a, **k)
+        cfg.technical = dataclasses.replace(cfg.technical, pivot_proximity_enabled=False)
+        return cfg
+
+    monkeypatch.setattr("swing_agent.agents.technical.load_config", patched)
+
+
+def test_pullback_setup_detected(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _disable_pivot_proximity(monkeypatch)
     _seed_pullback(memory_conn)
     result = get_technical_signal(memory_conn, "PBK")
     assert result["verdict"] == "TRIGGER"
@@ -99,7 +117,8 @@ def test_pullback_setup_detected(memory_conn: sqlite3.Connection) -> None:
     assert result["half_size"] is False
 
 
-def test_breakout_setup_detected(memory_conn: sqlite3.Connection) -> None:
+def test_breakout_setup_detected(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _disable_pivot_proximity(monkeypatch)
     _seed_breakout(memory_conn)
     result = get_technical_signal(memory_conn, "BRK")
     assert result["verdict"] == "TRIGGER"
@@ -210,6 +229,31 @@ def test_volatility_percentile_none_without_enough_history(memory_conn: sqlite3.
 
 def test_volatility_percentile_none_for_unknown_ticker(memory_conn: sqlite3.Connection) -> None:
     assert get_volatility_percentile(memory_conn, "NOPE", lookback_days=252) is None
+
+
+def test_pivot_proximity_passes_trivially_when_disabled() -> None:
+    import dataclasses
+    cfg = dataclasses.replace(load_config().technical, pivot_proximity_enabled=False)
+    # entry is 10 ATRs away from S1 -- would fail if the filter were active
+    assert _passes_pivot_proximity(entry=100.0, pivot_s1=50.0, atr=1.0, cfg=cfg) is True
+
+
+def test_pivot_proximity_rejects_far_entries_when_enabled() -> None:
+    import dataclasses
+    cfg = dataclasses.replace(load_config().technical, pivot_proximity_enabled=True, pivot_proximity_atr_max=1.5)
+    assert _passes_pivot_proximity(entry=100.0, pivot_s1=95.0, atr=1.0, cfg=cfg) is False  # 5 ATRs away
+
+
+def test_pivot_proximity_accepts_near_entries_when_enabled() -> None:
+    import dataclasses
+    cfg = dataclasses.replace(load_config().technical, pivot_proximity_enabled=True, pivot_proximity_atr_max=1.5)
+    assert _passes_pivot_proximity(entry=100.0, pivot_s1=99.0, atr=1.0, cfg=cfg) is True  # 1 ATR away
+
+
+def test_pivot_proximity_passes_trivially_when_pivot_unavailable() -> None:
+    import dataclasses
+    cfg = dataclasses.replace(load_config().technical, pivot_proximity_enabled=True)
+    assert _passes_pivot_proximity(entry=100.0, pivot_s1=None, atr=1.0, cfg=cfg) is True
 
 
 def test_no_setup_on_flat_thin_history(memory_conn: sqlite3.Connection) -> None:

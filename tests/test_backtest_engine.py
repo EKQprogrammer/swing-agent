@@ -58,7 +58,24 @@ def _leadin_closes() -> tuple[list[float], float, float]:
     return closes, dip, entry_close
 
 
-def test_full_cycle_partial_exits_and_forced_close(memory_conn: sqlite3.Connection) -> None:
+def _disable_pivot_proximity(monkeypatch) -> None:
+    """These tests exercise exit-rule/risk-gating mechanics, not the
+    (already separately, directly tested) pivot-proximity gate -- disable
+    it so fixtures predating that gate don't incidentally depend on where
+    pivots happen to land."""
+    import dataclasses
+    from swing_agent.config import load_config as real_load_config
+
+    def patched(*a, **k):
+        cfg = real_load_config(*a, **k)
+        cfg.technical = dataclasses.replace(cfg.technical, pivot_proximity_enabled=False)
+        return cfg
+
+    monkeypatch.setattr("swing_agent.backtest.engine.load_config", patched)
+
+
+def test_full_cycle_partial_exits_and_forced_close(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _disable_pivot_proximity(monkeypatch)
     _seed_market(memory_conn)
     closes, dip, entry_close = _leadin_closes()
     jump_close = entry_close + 50  # blows well past both 2R and 3R targets
@@ -81,7 +98,8 @@ def test_full_cycle_partial_exits_and_forced_close(memory_conn: sqlite3.Connecti
     assert trade["r_multiple"] > 3.0  # 2R + 3R partials plus a big final mark-to-market
 
 
-def test_stop_out_loses_approximately_1r(memory_conn: sqlite3.Connection) -> None:
+def test_stop_out_loses_approximately_1r(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _disable_pivot_proximity(monkeypatch)
     _seed_market(memory_conn)
     closes, dip, entry_close = _leadin_closes()
     closes.append(entry_close - 30)  # gaps straight through the stop the next day
@@ -100,7 +118,8 @@ def test_stop_out_loses_approximately_1r(memory_conn: sqlite3.Connection) -> Non
     assert trade["r_multiple"] == -1.0
 
 
-def test_time_stop_exits_flat_trade_after_five_days(memory_conn: sqlite3.Connection) -> None:
+def test_time_stop_exits_flat_trade_after_five_days(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _disable_pivot_proximity(monkeypatch)
     _seed_market(memory_conn)
     closes, dip, entry_close = _leadin_closes()
     closes.extend([entry_close] * 8)  # flat -- never reaches 1R
@@ -142,7 +161,8 @@ def _seed_pullback_ticker(conn: sqlite3.Connection, ticker: str) -> None:
     upsert_prices(conn, ticker, _price_df(ALL_DATES[: len(closes)], opens, highs, lows, closes, volumes))
 
 
-def test_use_fundamentals_false_ignores_missing_fundamentals(memory_conn: sqlite3.Connection) -> None:
+def test_use_fundamentals_false_ignores_missing_fundamentals(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _disable_pivot_proximity(monkeypatch)
     _seed_market(memory_conn)
     _seed_pullback_ticker(memory_conn, "TST")
     # default use_fundamentals=False: same behavior as before this feature existed
@@ -177,7 +197,20 @@ def _patch_small_rs_lookback(monkeypatch) -> None:
 
 
 def test_use_fundamentals_true_allows_trade_with_passing_fundamentals(memory_conn: sqlite3.Connection, monkeypatch) -> None:
-    _patch_small_rs_lookback(monkeypatch)
+    # Both _patch_small_rs_lookback and _disable_pivot_proximity monkeypatch
+    # the same load_config attribute from scratch (via real_load_config), so
+    # calling them back-to-back would have the second silently clobber the
+    # first's change. Compose them into a single patched config instead.
+    import dataclasses
+    from swing_agent.config import load_config as real_load_config
+
+    def combined(*a, **k):
+        cfg = real_load_config(*a, **k)
+        cfg.fundamental.rs_lookback_days = 10
+        cfg.technical = dataclasses.replace(cfg.technical, pivot_proximity_enabled=False)
+        return cfg
+
+    monkeypatch.setattr("swing_agent.backtest.engine.load_config", combined)
     _seed_market(memory_conn)
     _seed_pullback_ticker(memory_conn, "TST")
     upsert_fundamentals(memory_conn, {**PASSING_FUNDAMENTALS, "ticker": "TST"})
