@@ -108,6 +108,42 @@ def test_failed_breakdown_setup_detected(memory_conn: sqlite3.Connection) -> Non
     assert result["half_size"] is True
 
 
+def _seed_gap_fade(conn: sqlite3.Connection, ticker: str = "GAP", n_lead: int = 45) -> None:
+    dates = pd.date_range("2023-01-01", periods=n_lead + 1, freq="D")
+    closes = [100.0] * n_lead
+    opens = [100.0] * n_lead
+    highs = [100.0] * n_lead
+    lows = [100.0] * n_lead
+    volumes = [1_000_000] * n_lead
+
+    opens.append(96.0)   # 4% gap down vs yesterday's close (100)
+    lows.append(95.0)
+    highs.append(98.0)
+    closes.append(97.5)  # green, closes in the upper half of [95, 98]
+    volumes.append(2_000_000)  # panic volume, 2x avg
+
+    upsert_prices(conn, ticker, _price_df(dates, opens, highs, lows, closes, volumes))
+
+
+def test_gap_fade_setup_detected(memory_conn: sqlite3.Connection) -> None:
+    _seed_gap_fade(memory_conn)
+    result = get_technical_signal(memory_conn, "GAP")
+    assert result["verdict"] == "TRIGGER"
+    assert result["setup"] == "GAP_FADE"
+    assert result["half_size"] is True
+    assert result["entry"] > result["stop"]
+
+
+def test_gap_fade_does_not_fire_on_normal_up_day(memory_conn: sqlite3.Connection) -> None:
+    n = 46
+    dates = pd.date_range("2023-01-01", periods=n, freq="D")
+    closes = [100.0 + i * 0.1 for i in range(n)]  # no gap, mild drift, no volume spike
+    volumes = [1_000_000] * n
+    upsert_prices(memory_conn, "NOGAP", _price_df(dates, closes, closes, closes, closes, volumes))
+    result = get_technical_signal(memory_conn, "NOGAP")
+    assert result["setup"] != "GAP_FADE"
+
+
 def test_no_setup_on_flat_thin_history(memory_conn: sqlite3.Connection) -> None:
     _seed_flat(memory_conn)
     result = get_technical_signal(memory_conn, "FLT")

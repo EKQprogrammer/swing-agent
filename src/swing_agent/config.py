@@ -85,6 +85,13 @@ class TechnicalConfig:
     failed_breakdown_support_window: int = 20
     failed_breakdown_volume_multiplier: float = 1.5
     failed_breakdown_recovery_days: int = 2
+    # Tier 1 item E: Gap Fade, adapted for daily bars (no premarket volume
+    # data available from yfinance/EODHD -- that's a real-time/tick product,
+    # not part of this project's free stack). Fades an overdone gap-down
+    # panic: gap down >= gap_fade_down_pct on panic volume, but closes green
+    # and in the upper half of the day's range (buyers absorbed the panic).
+    gap_fade_down_pct: float = 3.0
+    gap_fade_volume_multiplier: float = 1.5
 
 
 @dataclass

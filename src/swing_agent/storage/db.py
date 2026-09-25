@@ -169,6 +169,28 @@ def get_fundamentals_as_of(conn: sqlite3.Connection, ticker: str, as_of_date: st
     return dict(zip(_FUNDAMENTALS_COLUMNS, row))
 
 
+def upsert_earnings_dates(conn: sqlite3.Connection, ticker: str, report_dates: list[str]) -> int:
+    """INSERT OR REPLACE one row per historical earnings report date."""
+    if not report_dates:
+        return 0
+    rows = [(ticker, d) for d in report_dates]
+    conn.executemany(
+        "INSERT OR REPLACE INTO earnings_dates (ticker, report_date) VALUES (?, ?)", rows
+    )
+    conn.commit()
+    return len(rows)
+
+
+def get_earnings_dates(conn: sqlite3.Connection, ticker: str) -> list[str]:
+    """All known report dates for `ticker`, ascending -- callers needing
+    point-in-time behavior should bisect this list themselves (see
+    backtest/engine.py's pattern for other precomputed per-ticker series)."""
+    rows = conn.execute(
+        "SELECT report_date FROM earnings_dates WHERE ticker = ? ORDER BY report_date ASC", (ticker,)
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 def get_latest_date(conn: sqlite3.Connection, table: str, key_col: str, key_val: str) -> str | None:
     """Returns MAX(date) for the given key. `table`/`key_col` are restricted to
     an allow-list, never interpolated from arbitrary caller input, to avoid

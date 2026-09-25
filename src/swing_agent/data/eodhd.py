@@ -198,11 +198,27 @@ def fetch_and_store_fundamentals(conn: sqlite3.Connection, ticker: str, api_key:
     return metrics
 
 
+def extract_earnings_report_dates(raw: dict) -> list[str]:
+    """Pulls every historical reportDate out of EODHD's Earnings.History
+    (already present in fetch_raw_fundamentals's payload -- no separate API
+    call). Dates with a null/missing reportDate (upcoming, not-yet-reported
+    quarters) are skipped. Returns ascending, deduplicated dates."""
+    history = (raw.get("Earnings") or {}).get("History") or {}
+    dates = {
+        entry.get("reportDate")
+        for entry in history.values()
+        if isinstance(entry, dict) and entry.get("reportDate")
+    }
+    return sorted(dates)
+
+
 def fetch_and_store_historical_fundamentals(conn: sqlite3.Connection, ticker: str, api_key: str) -> int:
     """Backtest-path: writes ALL available annual fundamentals rows (one per
-    filed_date), enabling genuine point-in-time Layer 2 backtesting.
-    Returns the number of rows written."""
-    from swing_agent.storage.db import upsert_fundamentals
+    filed_date), enabling genuine point-in-time Layer 2 backtesting, AND all
+    known historical earnings report dates (Tier 1 earnings filter) from the
+    same already-fetched payload. Returns the number of fundamentals rows
+    written (earnings row count is logged separately)."""
+    from swing_agent.storage.db import upsert_earnings_dates, upsert_fundamentals
 
     logger.info("Fetching historical fundamentals for %s from EODHD", ticker)
     raw = fetch_raw_fundamentals(ticker, api_key)
@@ -210,4 +226,9 @@ def fetch_and_store_historical_fundamentals(conn: sqlite3.Connection, ticker: st
     for metrics in series:
         upsert_fundamentals(conn, metrics)
     logger.info("Wrote %d historical fundamentals rows for %s", len(series), ticker)
+
+    report_dates = extract_earnings_report_dates(raw)
+    n_earnings = upsert_earnings_dates(conn, ticker, report_dates)
+    logger.info("Wrote %d earnings report dates for %s", n_earnings, ticker)
+
     return len(series)

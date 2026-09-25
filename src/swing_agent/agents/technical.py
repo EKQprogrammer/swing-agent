@@ -69,18 +69,62 @@ def _load_price_history(
     return df.iloc[::-1].reset_index(drop=True)
 
 
+def _compute_weekly_pivots(df: pd.DataFrame) -> pd.DataFrame:
+    """Tier 1, item A: classic floor-trader pivot points (PP/R1/S1/R2/S2),
+    computed from the PRIOR completed week's H/L/C and carried forward onto
+    every day of the following week -- no look-ahead (a week's pivots only
+    ever derive from a week that has already fully closed). Weekly (not
+    daily) pivots, since daily pivots are an intraday tool and this system
+    holds 3 days to 3 weeks. Informational only for now (see config.py) --
+    not gating any entry -- exposed on the result dict for diagnosis."""
+    out = df.copy()
+    dt = pd.to_datetime(out["date"])
+    weekly = (
+        out.assign(_dt=dt)
+        .set_index("_dt")
+        .resample("W-FRI")
+        .agg(high=("high", "max"), low=("low", "min"), close=("close", "last"))
+    )
+    weekly = weekly.shift(1).dropna()
+    pp = (weekly["high"] + weekly["low"] + weekly["close"]) / 3
+    weekly_pivots = pd.DataFrame(
+        {
+            "pivot_pp": pp,
+            "pivot_r1": 2 * pp - weekly["low"],
+            "pivot_s1": 2 * pp - weekly["high"],
+            "pivot_r2": pp + (weekly["high"] - weekly["low"]),
+            "pivot_s2": pp - (weekly["high"] - weekly["low"]),
+        }
+    ).reset_index().rename(columns={"_dt": "week_end"})
+
+    left = out.assign(_dt=dt)
+    if weekly_pivots.empty:
+        for col in ("pivot_pp", "pivot_r1", "pivot_s1", "pivot_r2", "pivot_s2"):
+            left[col] = float("nan")
+        return left.drop(columns=["_dt"])
+
+    merged = pd.merge_asof(
+        left.sort_values("_dt"), weekly_pivots.sort_values("week_end"),
+        left_on="_dt", right_on="week_end", direction="backward",
+    )
+    return merged.drop(columns=["_dt", "week_end"])
+
+
 def compute_indicators(df: pd.DataFrame, cfg) -> pd.DataFrame:
-    """Adds ema_fast/ema_slow/rsi/atr/avg_volume columns to an ascending-date
-    OHLCV DataFrame. RSI is computed and reported (the "timing" leg of the
-    3-indicator stack) but does not gate setup detection below — CLAUDE.md's
-    setup definitions reference EMA/volume/price action only, with no
-    explicit RSI threshold, unlike Layer 1's explicit VIX thresholds."""
+    """Adds ema_fast/ema_slow/rsi/atr/avg_volume/pivot_* columns to an
+    ascending-date OHLCV DataFrame. RSI is computed and reported (the
+    "timing" leg of the 3-indicator stack) but does not gate setup detection
+    below — CLAUDE.md's setup definitions reference EMA/volume/price action
+    only, with no explicit RSI threshold, unlike Layer 1's explicit VIX
+    thresholds. Weekly pivots (Tier 1 item A) are likewise informational
+    only for now -- see _compute_weekly_pivots."""
     out = df.copy()
     out["ema_fast"] = out["close"].ewm(span=cfg.ema_fast, adjust=False).mean()
     out["ema_slow"] = out["close"].ewm(span=cfg.ema_slow, adjust=False).mean()
     out["rsi"] = _rsi(out["close"], cfg.rsi_period)
     out["atr"] = _atr(out, cfg.atr_period)
     out["avg_volume"] = out["volume"].rolling(window=cfg.volume_avg_window).mean()
+    out = _compute_weekly_pivots(out)
     return out
 
 
@@ -227,14 +271,60 @@ def _detect_failed_breakdown(df: pd.DataFrame, cfg) -> dict | None:
     return None
 
 
+def _detect_gap_fade(df: pd.DataFrame, cfg) -> dict | None:
+    """Tier 1 item E: Gap Fade, adapted for daily bars (no premarket-volume
+    data available -- see TechnicalConfig's comment). Today gaps down
+    gap_fade_down_pct+ vs yesterday's close on panic volume, but closes
+    green and in the upper half of its own day's range -- the panic gap was
+    overdone and buyers absorbed it. Half size: a counter-trend reversal
+    play, same precedent as FAILED_BREAKDOWN."""
+    if len(df) < cfg.volume_avg_window + 2:
+        return None
+
+    today = df.iloc[-1]
+    yesterday = df.iloc[-2]
+
+    if yesterday["close"] <= 0:
+        return None
+    gap_pct = (today["open"] - yesterday["close"]) / yesterday["close"] * 100
+    gapped_down = gap_pct <= -cfg.gap_fade_down_pct
+
+    avg_volume = today["avg_volume"]
+    panic_volume = (
+        pd.notna(avg_volume) and avg_volume > 0
+        and today["volume"] >= cfg.gap_fade_volume_multiplier * avg_volume
+    )
+
+    day_range = today["high"] - today["low"]
+    closed_green = today["close"] > today["open"]
+    closed_upper_half = day_range > 0 and today["close"] >= today["low"] + day_range / 2
+
+    if not (gapped_down and panic_volume and closed_green and closed_upper_half):
+        return None
+
+    entry = today["close"]
+    stop = _initial_stop(entry, today["low"], today["atr"], cfg)
+    return {
+        "setup": "GAP_FADE",
+        "entry": float(entry),
+        "stop": float(stop),
+        "half_size": True,
+        "reasoning": (
+            f"Gapped down {gap_pct:.1f}% on panic volume {today['volume']:.0f} vs avg "
+            f"{avg_volume:.0f}, closed green in the upper half of the day's range "
+            f"(overdone panic absorbed by buyers)."
+        ),
+    }
+
+
 def get_technical_signal(
     conn: sqlite3.Connection, ticker: str, as_of_date: str | None = None
 ) -> dict:
     """Layer 3 — Technical Trigger. Loads point-in-time price history, computes
-    the EMA/RSI/ATR/volume indicator stack, and checks the three setups in
-    the order PULLBACK, BREAKOUT, FAILED_BREAKDOWN, returning the first match.
-    If none match, verdict is NO_SETUP (not an error) with indicators still
-    reported for visibility.
+    the EMA/RSI/ATR/volume indicator stack, and checks the four setups in
+    the order PULLBACK, BREAKOUT, FAILED_BREAKDOWN, GAP_FADE, returning the
+    first match. If none match, verdict is NO_SETUP (not an error) with
+    indicators still reported for visibility.
     """
     cfg = load_config().technical
     lookback = max(cfg.breakout_max_days, cfg.failed_breakdown_support_window) + 60
@@ -244,7 +334,12 @@ def get_technical_signal(
     resolved_date = df["date"].iloc[-1]
     today = df.iloc[-1]
 
-    match = _detect_pullback(df, cfg) or _detect_breakout(df, cfg) or _detect_failed_breakdown(df, cfg)
+    match = (
+        _detect_pullback(df, cfg)
+        or _detect_breakout(df, cfg)
+        or _detect_failed_breakdown(df, cfg)
+        or _detect_gap_fade(df, cfg)
+    )
 
     result = {
         "ticker": ticker,
@@ -254,12 +349,15 @@ def get_technical_signal(
         "ema_slow": float(today["ema_slow"]),
         "rsi": float(today["rsi"]) if pd.notna(today["rsi"]) else None,
         "atr": float(today["atr"]) if pd.notna(today["atr"]) else None,
+        "pivot_pp": float(today["pivot_pp"]) if pd.notna(today["pivot_pp"]) else None,
+        "pivot_s1": float(today["pivot_s1"]) if pd.notna(today["pivot_s1"]) else None,
+        "pivot_r1": float(today["pivot_r1"]) if pd.notna(today["pivot_r1"]) else None,
     }
 
     if match is None:
         logger.info("Technical signal for %s as of %s: NO_SETUP", ticker, resolved_date)
         result.update({"verdict": "NO_SETUP", "setup": None, "entry": None, "stop": None,
-                        "half_size": False, "reasoning": "No PULLBACK/BREAKOUT/FAILED_BREAKDOWN setup detected."})
+                        "half_size": False, "reasoning": "No PULLBACK/BREAKOUT/FAILED_BREAKDOWN/GAP_FADE setup detected."})
         return result
 
     logger.info("Technical signal for %s as of %s: %s", ticker, resolved_date, match["setup"])

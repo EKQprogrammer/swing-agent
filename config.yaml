@@ -58,6 +58,8 @@ technical:
   failed_breakdown_support_window: 20
   failed_breakdown_volume_multiplier: 1.5
   failed_breakdown_recovery_days: 2
+  gap_fade_down_pct: 3.0
+  gap_fade_volume_multiplier: 1.5
 
 risk:
   reduce_size_after_losses: 3

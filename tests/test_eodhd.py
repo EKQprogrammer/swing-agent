@@ -10,11 +10,12 @@ from swing_agent.data.eodhd import (
     EodhdFetchError,
     compute_fundamental_metrics_series,
     compute_latest_fundamental_metrics,
+    extract_earnings_report_dates,
     fetch_and_store_fundamentals,
     fetch_and_store_historical_fundamentals,
     fetch_raw_fundamentals,
 )
-from swing_agent.storage.db import get_cached_fundamentals, upsert_prices
+from swing_agent.storage.db import get_cached_fundamentals, get_earnings_dates, upsert_prices
 
 
 def _price_df(dates, closes) -> pd.DataFrame:
@@ -64,6 +65,14 @@ def _raw_payload() -> dict:
                     "2023-12-31": {"totalStockholderEquity": "800000000", "shortLongTermDebtTotal": "200000000", "cash": "100000000"},
                 }
             },
+        },
+        "Earnings": {
+            "History": {
+                "2023-09-30": {"reportDate": "2023-10-26", "date": "2023-09-30", "epsActual": 1.1},
+                "2023-12-31": {"reportDate": "2024-01-25", "date": "2023-12-31", "epsActual": 1.3},
+                "2024-03-31": {"reportDate": None, "date": "2024-03-31", "epsActual": None},  # not yet reported
+                "2024-06-30": {"reportDate": "2024-01-25", "date": "2024-06-30"},  # duplicate date -> deduped
+            }
         },
     }
 
@@ -159,6 +168,17 @@ def test_empty_income_statement_raises(memory_conn: sqlite3.Connection) -> None:
         compute_latest_fundamental_metrics(memory_conn, "ACME", raw)
 
 
+def test_extract_earnings_report_dates_dedupes_sorts_and_skips_null() -> None:
+    dates = extract_earnings_report_dates(_raw_payload())
+    # 2024-03-31 entry has reportDate=None (not yet reported) -> skipped.
+    # 2024-06-30 shares reportDate "2024-01-25" with the 2023-12-31 entry -> deduped.
+    assert dates == ["2023-10-26", "2024-01-25"]
+
+
+def test_extract_earnings_report_dates_handles_missing_earnings_key() -> None:
+    assert extract_earnings_report_dates({"Financials": {}}) == []
+
+
 def test_fetch_and_store_historical_writes_all_years(memory_conn: sqlite3.Connection, monkeypatch) -> None:
     _seed_prices(memory_conn)
     monkeypatch.setattr("swing_agent.data.eodhd.fetch_raw_fundamentals", lambda ticker, api_key, exchange="US": _raw_payload())
@@ -166,6 +186,13 @@ def test_fetch_and_store_historical_writes_all_years(memory_conn: sqlite3.Connec
     assert n == 3
     count = memory_conn.execute("SELECT COUNT(*) FROM fundamentals WHERE ticker='ACME'").fetchone()[0]
     assert count == 3
+
+
+def test_fetch_and_store_historical_also_writes_earnings_dates(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _seed_prices(memory_conn)
+    monkeypatch.setattr("swing_agent.data.eodhd.fetch_raw_fundamentals", lambda ticker, api_key, exchange="US": _raw_payload())
+    fetch_and_store_historical_fundamentals(memory_conn, "ACME", "fake-key")
+    assert get_earnings_dates(memory_conn, "ACME") == ["2023-10-26", "2024-01-25"]
 
 
 def test_fetch_and_store_live_writes_only_latest(memory_conn: sqlite3.Connection, monkeypatch) -> None:

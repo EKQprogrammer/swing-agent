@@ -40,3 +40,13 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     fetched_at          TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (ticker, filed_date)
 );
+
+-- Historical earnings report dates (Tier 1 earnings-calendar filter), from
+-- EODHD's fundamentals payload's Earnings.History[*].reportDate -- extracted
+-- during the same fetch as fundamentals, no separate API call.
+CREATE TABLE IF NOT EXISTS earnings_dates (
+    ticker       TEXT NOT NULL,
+    report_date  TEXT NOT NULL,
+    fetched_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (ticker, report_date)
+);

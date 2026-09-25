@@ -12,6 +12,7 @@ from swing_agent.agents.risk_manager import compute_trade_plan
 from swing_agent.agents.technical import (
     _detect_breakout,
     _detect_failed_breakdown,
+    _detect_gap_fade,
     _detect_pullback,
     compute_indicators,
 )
@@ -75,6 +76,7 @@ def _scan_technical_signal_fast(raw_df: pd.DataFrame, technical_cfg, as_of_date:
         _detect_pullback(indicator_df, technical_cfg)
         or _detect_breakout(indicator_df, technical_cfg)
         or _detect_failed_breakdown(indicator_df, technical_cfg)
+        or _detect_gap_fade(indicator_df, technical_cfg)
     )
     if match is None:
         return None
@@ -164,6 +166,26 @@ def _fundamental_verdict_fast(
     return {"verdict": verdict, "failed_checks": failed, "reasoning": reasoning}
 
 
+def _entry_calendar_context(date: str) -> dict:
+    """Tier 1 item C: day-of-week and monthly-options-expiry-Friday tagging
+    for a trade's entry date -- pure date arithmetic, no new data source.
+    Recorded on every trade for diagnosis; NOT an entry filter yet -- only
+    becomes one if train-period data actually shows a real, consistent
+    effect (see the plan's train-diagnostic-first discipline)."""
+    import calendar as _calendar
+    from datetime import date as _date
+
+    d = _date.fromisoformat(date)
+    is_expiry_friday = False
+    if d.weekday() == 4:  # Friday
+        fridays = [
+            day for day in range(1, _calendar.monthrange(d.year, d.month)[1] + 1)
+            if _date(d.year, d.month, day).weekday() == 4
+        ]
+        is_expiry_friday = len(fridays) >= 3 and fridays[2] == d.day
+    return {"entry_day_of_week": d.strftime("%A"), "entry_is_expiry_friday": is_expiry_friday}
+
+
 def _trading_dates(conn: sqlite3.Connection, start_date: str, end_date: str) -> list[str]:
     rows = conn.execute(
         "SELECT DISTINCT date FROM prices WHERE ticker = 'SPY' AND date BETWEEN ? AND ? ORDER BY date ASC",
@@ -188,6 +210,8 @@ class _OpenTrade:
     entry_reasoning: str = ""
     entry_indicators: dict = field(default_factory=dict)
     macro_regime_at_entry: str = ""
+    entry_day_of_week: str = ""
+    entry_is_expiry_friday: bool = False
     breakeven_moved: bool = False
     partial_2r_taken: bool = False
     partial_3r_taken: bool = False
@@ -212,6 +236,8 @@ def _close_trade_record(trade: _OpenTrade, exit_date: str, closed_trades: list[d
             "entry_reasoning": trade.entry_reasoning,
             "entry_indicators": trade.entry_indicators,
             "macro_regime_at_entry": trade.macro_regime_at_entry,
+            "entry_day_of_week": trade.entry_day_of_week,
+            "entry_is_expiry_friday": trade.entry_is_expiry_friday,
         }
     )
 
@@ -380,6 +406,7 @@ def run_backtest(
                 if risk["verdict"] != "APPROVE":
                     continue
 
+                calendar_ctx = _entry_calendar_context(date)
                 open_trades[ticker] = _OpenTrade(
                     ticker=ticker, setup=match["setup"], entry_date=date, entry_day_index=day_index,
                     entry_price=risk["entry"], current_stop=risk["stop"],
@@ -389,6 +416,8 @@ def run_backtest(
                     entry_reasoning=match["reasoning"],
                     entry_indicators=match["indicators"],
                     macro_regime_at_entry=macro["regime"],
+                    entry_day_of_week=calendar_ctx["entry_day_of_week"],
+                    entry_is_expiry_friday=calendar_ctx["entry_is_expiry_friday"],
                 )
 
         equity_curve.append({"date": date, "equity": equity})
