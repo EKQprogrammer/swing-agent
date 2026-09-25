@@ -8,7 +8,7 @@ from swing_agent.agents.macro_regime import get_macro_regime
 from swing_agent.agents.risk_manager import compute_trade_plan
 from swing_agent.agents.technical import get_technical_signal
 from swing_agent.config import load_config
-from swing_agent.data.fundamentals import fetch_and_store_fundamentals
+from swing_agent.data.eodhd import fetch_and_store_fundamentals
 from swing_agent.logging_setup import get_logger
 
 logger = get_logger(__name__)

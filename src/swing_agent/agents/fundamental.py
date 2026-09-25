@@ -5,7 +5,7 @@ import sqlite3
 from typing import Callable
 
 from swing_agent.config import load_config
-from swing_agent.data.fundamentals import fetch_and_store_fundamentals
+from swing_agent.data.eodhd import fetch_and_store_fundamentals
 from swing_agent.logging_setup import get_logger
 from swing_agent.storage.db import get_cached_fundamentals
 
@@ -72,21 +72,24 @@ def get_fundamental_verdict(
 
     Reads cached fundamentals (7-day TTL, see config.fundamental.ttl_days)
     from SQLite; on a cache miss/stale entry, calls `fetch_fn` (default: live
-    FMP fetch, requires FMP_API_KEY) to refresh it. Relative strength is
-    computed locally from the `prices` table against the configured universe
-    (no network call). Verdict is PASS only if every Layer 2 threshold from
-    config.yaml passes; otherwise REJECT, with the failing checks listed.
+    EODHD fetch, requires EODHD_API_KEY -- see data/eodhd.py) to refresh it.
+    Relative strength is computed locally from the `prices` table against
+    the configured universe (no network call). Verdict is PASS only if
+    every Layer 2 threshold from config.yaml passes; otherwise REJECT, with
+    the failing checks listed.
 
     `fetch_fn` is injectable so tests/offline runs can seed the cache
-    directly or supply a fake fetch function instead of hitting the live FMP
-    API — real API calls belong behind @pytest.mark.live.
+    directly or supply a fake fetch function instead of hitting the live
+    API — real API calls belong behind @pytest.mark.live. An FMP-based
+    fetch_fn (data/fundamentals.py, current/TTM data only, no point-in-time
+    history) remains available and can be passed explicitly if needed.
     """
     cfg = load_config()
     fcfg = cfg.fundamental
 
     cached = get_cached_fundamentals(conn, ticker, ttl_days=fcfg.ttl_days)
     if cached is None:
-        api_key = os.environ.get("FMP_API_KEY", "")
+        api_key = os.environ.get("EODHD_API_KEY", "")
         cached = fetch_fn(conn, ticker, api_key)
 
     resolved_date = as_of_date or cached.get("filed_date")

@@ -14,10 +14,10 @@ so this page fetches nothing automatically: data only refreshes when the
 on a schedule, whose data/scans/scan_<date>.json output this page also
 reads if present).
 
-FMP_API_KEY resolution: read from the environment as usual for local runs
-(.env via python-dotenv, see swing_agent.config.load_config); if unset,
-falls back to Streamlit's secrets manager (st.secrets["FMP_API_KEY"]) so a
-Streamlit Community Cloud deployment can supply it via Settings -> Secrets
+EODHD_API_KEY / FMP_API_KEY resolution: read from the environment as usual
+for local runs (.env via python-dotenv, see swing_agent.config.load_config);
+if unset, falls back to Streamlit's secrets manager (st.secrets[...]) so a
+Streamlit Community Cloud deployment can supply them via Settings -> Secrets
 without an .env file (which never leaves your machine / is gitignored).
 
 Theming lives in .streamlit/config.toml (dark, trading-terminal palette).
@@ -42,13 +42,14 @@ from swing_agent.data.macro import fetch_and_store_macro_series
 from swing_agent.data.prices import fetch_and_store_prices
 from swing_agent.storage.db import get_connection
 
-if not os.environ.get("FMP_API_KEY"):
-    try:
-        secret_key = st.secrets.get("FMP_API_KEY")
-    except Exception:
-        secret_key = None
-    if secret_key:
-        os.environ["FMP_API_KEY"] = secret_key
+for _key_name in ("EODHD_API_KEY", "FMP_API_KEY"):
+    if not os.environ.get(_key_name):
+        try:
+            _secret_value = st.secrets.get(_key_name)
+        except Exception:
+            _secret_value = None
+        if _secret_value:
+            os.environ[_key_name] = _secret_value
 
 st.set_page_config(page_title="Swing Agent Dashboard", layout="wide")
 st.title("Swing Trading Agent")
