@@ -51,8 +51,60 @@ for _key_name in ("EODHD_API_KEY", "FMP_API_KEY"):
         if _secret_value:
             os.environ[_key_name] = _secret_value
 
-st.set_page_config(page_title="Swing Agent Dashboard", layout="wide")
-st.title("Swing Trading Agent")
+st.set_page_config(page_title="Swing Agent Dashboard", layout="wide", page_icon="📈")
+
+# -- design system -------------------------------------------------------
+# Streamlit's own markdown renderer treats a $...$ pair as inline LaTeX
+# (KaTeX), which silently mangles any prose containing dollar amounts (the
+# Trade Journal narratives are full of them) -- _escape_dollars() below
+# guards every place user-facing prose gets rendered via st.markdown.
+_STATUS_COLORS = {
+    "APPROVE": ("#0ca30c", "rgba(12,163,12,0.12)"),
+    "PASS": ("#0ca30c", "rgba(12,163,12,0.12)"),
+    "BULLISH": ("#0ca30c", "rgba(12,163,12,0.12)"),
+    "REJECT": ("#d03b3b", "rgba(208,59,59,0.12)"),
+    "BEARISH": ("#d03b3b", "rgba(208,59,59,0.12)"),
+    "ERROR": ("#d03b3b", "rgba(208,59,59,0.12)"),
+    "CAUTIOUS": ("#e6b41e", "rgba(230,180,30,0.12)"),
+}
+
+
+def _escape_dollars(text: str) -> str:
+    # A literal "\$" doesn't reliably suppress Streamlit's markdown-it+KaTeX
+    # $...$ math-mode matching (and can leave a visible backslash) -- the
+    # HTML entity form is decoded by the browser AFTER markdown parsing, so
+    # markdown-it's LaTeX regex never sees a raw "$" to match against.
+    return text.replace("$", "&#36;")
+
+
+def _badge(label: str) -> str:
+    fg, bg = _STATUS_COLORS.get(label, ("#9a9a9a", "rgba(154,154,154,0.12)"))
+    return (
+        f'<span style="display:inline-block;padding:2px 10px;border-radius:10px;'
+        f'font-size:0.8rem;font-weight:600;letter-spacing:0.02em;'
+        f'color:{fg};background:{bg};border:1px solid {fg}55;">{label}</span>'
+    )
+
+
+st.markdown(
+    """
+    <style>
+    .swa-title { font-size:2.1rem; font-weight:800; margin-bottom:0; }
+    .swa-subtitle { color:#9a9a9a; font-size:0.95rem; margin-top:2px; margin-bottom:1.2rem; }
+    .swa-card { border:1px solid #2a2a2a; border-radius:10px; padding:14px 18px; margin-bottom:10px; background:#141414; }
+    .swa-card-accent { border-left:3px solid var(--accent, #3987e5); }
+    .swa-stat-label { color:#9a9a9a; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.04em; }
+    .swa-stat-value { font-size:1.6rem; font-weight:700; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown('<div class="swa-title">📈 Swing Trading Agent</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="swa-subtitle">Three-layer macro / fundamental / technical screener, backtester, and trade journal</div>',
+    unsafe_allow_html=True,
+)
 
 cfg = load_config()
 conn = get_connection(cfg.data.db_path)
@@ -64,11 +116,10 @@ with st.sidebar:
     tickers_input = st.text_area("Tickers to scan (comma-separated)", value=default_watchlist, height=100)
     watchlist = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
     st.caption(
-        f"{len(watchlist)} ticker(s). Each ticker whose fundamentals cache has "
-        "expired (7-day TTL) costs ~4 FMP API calls on refresh -- keep the "
-        "list short if you're watching your free-tier quota."
+        f"{len(watchlist)} ticker(s). Stale fundamentals cost ~4 API calls "
+        "per ticker on refresh -- keep the list short if watching quota."
     )
-    refresh_clicked = st.button("Refresh scan", type="primary")
+    refresh_clicked = st.button("Refresh scan", type="primary", use_container_width=True)
 
 if refresh_clicked:
     # Every external call below is isolated in its own try/except: this runs
@@ -109,7 +160,7 @@ if refresh_clicked:
         st.session_state["fetch_warnings"] = fetch_warnings
 
 if st.session_state.get("fetch_warnings"):
-    with st.expander(f"{len(st.session_state['fetch_warnings'])} fetch warning(s) from the last refresh"):
+    with st.expander(f"⚠️ {len(st.session_state['fetch_warnings'])} fetch warning(s) from the last refresh"):
         for w in st.session_state["fetch_warnings"]:
             st.warning(w)
 
@@ -117,48 +168,65 @@ tab_scan, tab_backtest, tab_journal = st.tabs(["Macro & Scan", "Backtest", "Trad
 
 with tab_scan:
     st.subheader("Macro Regime")
-    with st.container(border=True):
-        try:
-            macro = get_macro_regime(conn)
-            cols = st.columns(4)
-            cols[0].metric("Regime", macro["regime"])
-            cols[1].metric("Size Modifier", f"{macro['position_size_modifier']}x")
-            cols[2].metric("SPY / 200MA", f"{macro['spy_close']:.2f} / {macro['spy_200ma']:.2f}")
-            cols[3].metric("VIX", f"{macro['vix']:.2f}")
-            st.caption(macro["reasoning"])
-        except MacroRegimeError:
-            st.info("No macro data yet -- click **Refresh scan** in the sidebar to fetch it.")
+    try:
+        macro = get_macro_regime(conn)
+        accent = _STATUS_COLORS.get(macro["regime"], ("#3987e5", ""))[0]
+        st.markdown(
+            f"""
+            <div class="swa-card swa-card-accent" style="--accent:{accent};">
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+                    <div>{_badge(macro['regime'])} <span style="margin-left:10px;color:#9a9a9a;">
+                        size modifier <b style="color:#fff;">{macro['position_size_modifier']}x</b></span></div>
+                </div>
+                <div style="display:flex;gap:40px;margin-top:14px;flex-wrap:wrap;">
+                    <div><div class="swa-stat-label">SPY / 200MA</div>
+                        <div class="swa-stat-value">{macro['spy_close']:.2f} / {macro['spy_200ma']:.2f}</div></div>
+                    <div><div class="swa-stat-label">VIX</div>
+                        <div class="swa-stat-value">{macro['vix']:.2f}</div></div>
+                </div>
+                <div style="color:#9a9a9a;font-size:0.85rem;margin-top:12px;">{macro['reasoning']}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    except MacroRegimeError:
+        st.info("No macro data yet -- click **Refresh scan** in the sidebar to fetch it.")
 
     st.subheader("Watchlist Scan")
     scan_results = st.session_state.get("scan_results")
+    scan_source = None
     if scan_results is None:
         scan_files = sorted(scans_dir.glob("scan_*.json")) if scans_dir.exists() else []
         if scan_files:
             scan_results = json.loads(scan_files[-1].read_text(encoding="utf-8"))
-            st.caption(f"Source: {scan_files[-1].name} (last scripts/daily_scan.py run)")
+            scan_source = scan_files[-1].name
 
     if scan_results is None:
         st.info("No scan results yet. Click **Refresh scan** in the sidebar, or run `python scripts/daily_scan.py` locally.")
     else:
-        rows = []
+        if scan_source:
+            st.caption(f"Source: {scan_source} (last scripts/daily_scan.py run)")
+        approved = [r for r in scan_results if r["verdict"] == "APPROVE"]
+        st.caption(f"{len(approved)} of {len(scan_results)} approved")
         for r in scan_results:
-            row = {"ticker": r["ticker"], "verdict": r["verdict"]}
             if r["verdict"] == "APPROVE":
                 risk = r["risk"]
-                row.update({
-                    "setup": r["technical"]["setup"], "entry": risk["entry"],
-                    "stop": risk["stop"], "shares": risk["shares"],
-                })
+                detail = (
+                    f"{r['technical']['setup']} &middot; entry <b>{risk['entry']:.2f}</b> "
+                    f"&middot; stop <b>{risk['stop']:.2f}</b> &middot; {risk['shares']} shares"
+                )
             else:
-                row["reject_layer"] = r.get("reject_layer")
-                row["reasoning"] = r.get("reasoning")
-            rows.append(row)
-        scan_df = pd.DataFrame(rows)
-        styled = scan_df.style.map(
-            lambda v: "color: #0ca30c" if v == "APPROVE" else ("color: #d03b3b" if v == "REJECT" else ""),
-            subset=["verdict"],
-        )
-        st.dataframe(styled, width="stretch")
+                detail = f"{r.get('reject_layer', 'n/a')} layer &middot; {r.get('reasoning', '')}"
+            st.markdown(
+                f"""
+                <div class="swa-card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+                    <div><b style="font-size:1.05rem;">{r['ticker']}</b>
+                        <span style="margin-left:10px;">{_badge(r['verdict'])}</span></div>
+                    <div style="color:#b5b5b5;font-size:0.88rem;">{detail}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 conn.close()
 
@@ -183,18 +251,36 @@ with tab_backtest:
         if equity_curve:
             st.subheader("Equity Curve")
             curve_df = pd.DataFrame(equity_curve).set_index("date")
-            st.line_chart(curve_df["equity"], color="#3987e5")
+            st.line_chart(curve_df["equity"], color="#3987e5", height=320)
+
+        by_setup = payload.get("by_setup")
+        if by_setup:
+            st.subheader("By Setup")
+            setup_cols = st.columns(len(by_setup))
+            for col, (setup, m) in zip(setup_cols, by_setup.items()):
+                wr = f"{m['win_rate']:.1f}%" if m.get("win_rate") is not None else "N/A"
+                ar = f"{m['avg_r']:.2f}" if m.get("avg_r") is not None else "N/A"
+                col.markdown(
+                    f"""<div class="swa-card"><div class="swa-stat-label">{setup}</div>
+                    <div class="swa-stat-value">{wr}</div>
+                    <div style="color:#9a9a9a;font-size:0.85rem;">{m['num_trades']} trades &middot; {ar} avg R</div></div>""",
+                    unsafe_allow_html=True,
+                )
 
         st.subheader("Trades")
         trades_df = pd.DataFrame(payload["trades"])
         if not trades_df.empty and "r_multiple" in trades_df.columns:
-            display_cols = [c for c in trades_df.columns if c not in ("fills", "entry_indicators", "narrative")]
+            display_cols = [
+                c for c in ["ticker", "setup", "entry_date", "exit_date", "entry_price", "shares", "pnl", "r_multiple"]
+                if c in trades_df.columns
+            ]
             styled_trades = trades_df[display_cols].style.map(
                 lambda v: "color: #0ca30c" if isinstance(v, (int, float)) and v > 0
                 else ("color: #d03b3b" if isinstance(v, (int, float)) and v < 0 else ""),
-                subset=["r_multiple"],
+                subset=["r_multiple", "pnl"],
             )
-            st.dataframe(styled_trades, width="stretch")
+            st.dataframe(styled_trades, width="stretch", hide_index=True)
+            st.caption("Full entry reasoning and macro context for each trade: see the Trade Journal tab.")
     else:
         st.info("No backtest results found yet.")
 
@@ -220,9 +306,25 @@ with tab_journal:
             filtered = [t for t in filtered if t["r_multiple"] < -0.05]
 
         st.caption(f"{len(filtered)} of {len(trades)} trades")
-        for t in filtered:
-            icon = "🟢" if t["r_multiple"] > 0.05 else ("🔴" if t["r_multiple"] < -0.05 else "⚪")
-            with st.container(border=True):
-                st.markdown(f"{icon} **{t['ticker']}** -- {t.get('narrative', '(no narrative)')}")
+        for t in filtered[:200]:
+            if t["r_multiple"] > 0.05:
+                label = "WIN"
+            elif t["r_multiple"] < -0.05:
+                label = "LOSS"
+            else:
+                label = "BREAKEVEN"
+            narrative = _escape_dollars(t.get("narrative", "(no narrative)"))
+            st.markdown(
+                f"""
+                <div class="swa-card">
+                    <div style="margin-bottom:6px;"><b style="font-size:1.02rem;">{t['ticker']}</b>
+                        <span style="margin-left:10px;">{_badge(label)}</span></div>
+                    <div style="color:#c9c9c9;font-size:0.9rem;line-height:1.5;">{narrative}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        if len(filtered) > 200:
+            st.caption(f"Showing first 200 of {len(filtered)} -- narrow with the filters above to see more.")
     else:
         st.info("No backtest results found yet. Run with `--narratives` to populate this tab.")
