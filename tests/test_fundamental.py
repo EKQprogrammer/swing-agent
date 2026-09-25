@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import sqlite3
+
+import pandas as pd
+import pytest
+
+from swing_agent.agents.fundamental import (
+    FundamentalError,
+    calculate_relative_strength,
+    get_fundamental_verdict,
+)
+from swing_agent.storage.db import upsert_fundamentals, upsert_prices
+
+FILED_DATE = "2024-06-01"
+LOOKBACK = 252
+
+
+def _price_df(dates: pd.DatetimeIndex, closes: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Open": closes,
+            "High": closes,
+            "Low": closes,
+            "Close": closes,
+            "Volume": [1_000_000] * len(closes),
+        },
+        index=dates,
+    )
+
+
+def _seed_return_series(
+    conn: sqlite3.Connection, ticker: str, total_return: float, end_date: str = FILED_DATE
+) -> None:
+    """Seeds LOOKBACK+1 daily rows ending on end_date with an exact total
+    return from the oldest to the newest close (linear interpolation)."""
+    days = LOOKBACK + 1
+    dates = pd.date_range(end=end_date, periods=days, freq="D")
+    start_price = 100.0
+    end_price = start_price * (1 + total_return)
+    step = (end_price - start_price) / (days - 1)
+    closes = [start_price + i * step for i in range(days)]
+    upsert_prices(conn, ticker, _price_df(dates, closes))
+
+
+PASSING_METRICS = {
+    "filed_date": FILED_DATE,
+    "roic": 15.0,
+    "fcf": 1_000_000.0,
+    "fcf_margin": 10.0,
+    "revenue_growth_yoy": 8.0,
+    "earnings_growth_yoy": 12.0,
+    "price": 50.0,
+    "avg_daily_volume": 1_000_000,
+}
+
+
+def _fake_fetch(call_log: list[str], metrics: dict | None = None):
+    def fetch_fn(conn: sqlite3.Connection, ticker: str, api_key: str) -> dict:
+        call_log.append(ticker)
+        row = {**(metrics or PASSING_METRICS), "ticker": ticker}
+        upsert_fundamentals(conn, row)
+        return row
+
+    return fetch_fn
+
+
+# --- calculate_relative_strength -------------------------------------------------
+
+
+def test_relative_strength_top_performer_is_100(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=0.50)
+    _seed_return_series(memory_conn, "SPY", total_return=0.10)
+    _seed_return_series(memory_conn, "AAPL", total_return=0.02)
+    rs = calculate_relative_strength(memory_conn, "ACME", ["SPY", "AAPL"], FILED_DATE, LOOKBACK)
+    assert rs == pytest.approx(100.0)
+
+
+def test_relative_strength_worst_performer_is_0(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=-0.10)
+    _seed_return_series(memory_conn, "SPY", total_return=0.10)
+    _seed_return_series(memory_conn, "AAPL", total_return=0.02)
+    rs = calculate_relative_strength(memory_conn, "ACME", ["SPY", "AAPL"], FILED_DATE, LOOKBACK)
+    assert rs == pytest.approx(0.0)
+
+
+def test_relative_strength_insufficient_history_raises(memory_conn: sqlite3.Connection) -> None:
+    with pytest.raises(FundamentalError):
+        calculate_relative_strength(memory_conn, "ACME", ["SPY"], FILED_DATE, LOOKBACK)
+
+
+# --- get_fundamental_verdict -------------------------------------------------
+
+
+def test_verdict_pass_when_all_checks_clear(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=0.50)
+    _seed_return_series(memory_conn, "SPY", total_return=0.05)
+    _seed_return_series(memory_conn, "AAPL", total_return=0.01)
+    call_log: list[str] = []
+    result = get_fundamental_verdict(memory_conn, "ACME", fetch_fn=_fake_fetch(call_log))
+    assert result["verdict"] == "PASS"
+    assert result["failed_checks"] == []
+    assert call_log == ["ACME"]
+
+
+def test_verdict_reject_on_weak_roic(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=0.50)
+    _seed_return_series(memory_conn, "SPY", total_return=0.05)
+    weak = {**PASSING_METRICS, "roic": 4.0}
+    call_log: list[str] = []
+    result = get_fundamental_verdict(memory_conn, "ACME", fetch_fn=_fake_fetch(call_log, weak))
+    assert result["verdict"] == "REJECT"
+    assert "roic" in result["failed_checks"]
+
+
+def test_verdict_reject_on_weak_relative_strength(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=-0.20)
+    _seed_return_series(memory_conn, "SPY", total_return=0.10)
+    _seed_return_series(memory_conn, "AAPL", total_return=0.05)
+    call_log: list[str] = []
+    result = get_fundamental_verdict(memory_conn, "ACME", fetch_fn=_fake_fetch(call_log))
+    assert result["verdict"] == "REJECT"
+    assert "relative_strength" in result["failed_checks"]
+
+
+def test_fresh_cache_skips_refetch(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=0.50)
+    _seed_return_series(memory_conn, "SPY", total_return=0.05)
+    call_log: list[str] = []
+    fetch_fn = _fake_fetch(call_log)
+    get_fundamental_verdict(memory_conn, "ACME", fetch_fn=fetch_fn)
+    get_fundamental_verdict(memory_conn, "ACME", fetch_fn=fetch_fn)
+    assert call_log == ["ACME"]  # second call hit the cache, no re-fetch
+
+
+def test_stale_cache_triggers_refetch(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=0.50)
+    _seed_return_series(memory_conn, "SPY", total_return=0.05)
+    call_log: list[str] = []
+    fetch_fn = _fake_fetch(call_log)
+    get_fundamental_verdict(memory_conn, "ACME", fetch_fn=fetch_fn)
+
+    memory_conn.execute(
+        "UPDATE fundamentals SET fetched_at = '2000-01-01 00:00:00' WHERE ticker='ACME'"
+    )
+    memory_conn.commit()
+
+    get_fundamental_verdict(memory_conn, "ACME", fetch_fn=fetch_fn)
+    assert call_log == ["ACME", "ACME"]  # stale cache forced a re-fetch

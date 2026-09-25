@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -95,6 +96,55 @@ def upsert_macro_series(conn: sqlite3.Connection, series_id: str, df: pd.DataFra
     conn.commit()
     logger.info("upsert_macro_series: wrote %d rows for series_id=%s", len(rows), series_id)
     return len(rows)
+
+
+_FUNDAMENTALS_COLUMNS = [
+    "ticker", "filed_date", "roic", "fcf", "fcf_margin", "revenue_growth_yoy",
+    "earnings_growth_yoy", "relative_strength", "price", "avg_daily_volume",
+]
+
+
+def upsert_fundamentals(conn: sqlite3.Connection, row: dict) -> None:
+    """INSERT OR REPLACE a single fundamentals row (see schema.sql). Missing
+    keys in `row` (e.g. relative_strength, computed separately from local
+    price data rather than fetched from FMP) default to None."""
+    values = {col: row.get(col) for col in _FUNDAMENTALS_COLUMNS}
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO fundamentals
+            (ticker, filed_date, roic, fcf, fcf_margin, revenue_growth_yoy,
+             earnings_growth_yoy, relative_strength, price, avg_daily_volume)
+        VALUES (:ticker, :filed_date, :roic, :fcf, :fcf_margin, :revenue_growth_yoy,
+                :earnings_growth_yoy, :relative_strength, :price, :avg_daily_volume)
+        """,
+        values,
+    )
+    conn.commit()
+
+
+def get_cached_fundamentals(conn: sqlite3.Connection, ticker: str, ttl_days: int) -> dict | None:
+    """Returns the most recent fundamentals row for `ticker` (by filed_date) if
+    it was fetched within the last `ttl_days`, else None (cache miss/stale)."""
+    row = conn.execute(
+        f"""
+        SELECT {', '.join(_FUNDAMENTALS_COLUMNS)}, fetched_at
+        FROM fundamentals
+        WHERE ticker = ?
+        ORDER BY filed_date DESC LIMIT 1
+        """,
+        (ticker,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    data = dict(zip(_FUNDAMENTALS_COLUMNS + ["fetched_at"], row))
+    # fetched_at is a naive UTC string from SQLite's datetime('now'); compare
+    # against a naive UTC "now" to avoid a naive/aware TypeError.
+    fetched_at = datetime.fromisoformat(data["fetched_at"])
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    if now_utc - fetched_at > timedelta(days=ttl_days):
+        return None
+    return data
 
 
 def get_latest_date(conn: sqlite3.Connection, table: str, key_col: str, key_val: str) -> str | None:

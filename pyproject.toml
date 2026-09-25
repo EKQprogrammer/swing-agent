@@ -13,3 +13,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "live: requires network access and a real API key (skipped by default)",
+]
