@@ -72,12 +72,28 @@ class TechnicalConfig:
 
 
 @dataclass
+class RiskConfig:
+    reduce_size_after_losses: int = 3
+    reduce_size_multiplier: float = 0.5
+    breakeven_r: float = 1.0
+    partial_exit_1_r: float = 2.0
+    partial_exit_1_pct: float = 50.0
+    partial_exit_2_r: float = 3.0
+    partial_exit_2_pct: float = 25.0
+    trail_remaining_pct: float = 25.0
+    trail_ema_days: int = 10
+    trail_atr_multiplier: float = 2.0
+    time_stop_days: int = 5
+
+
+@dataclass
 class Config:
     account: AccountConfig = field(default_factory=AccountConfig)
     macro_regime: MacroRegimeConfig = field(default_factory=MacroRegimeConfig)
     data: DataConfig = field(default_factory=DataConfig)
     fundamental: FundamentalConfig = field(default_factory=FundamentalConfig)
     technical: TechnicalConfig = field(default_factory=TechnicalConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:
@@ -96,6 +112,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     data = DataConfig(**raw.get("data", {}))
     fundamental = FundamentalConfig(**raw.get("fundamental", {}))
     technical = TechnicalConfig(**raw.get("technical", {}))
+    risk = RiskConfig(**raw.get("risk", {}))
 
     return Config(
         account=account,
@@ -103,4 +120,5 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         data=data,
         fundamental=fundamental,
         technical=technical,
+        risk=risk,
     )

@@ -55,3 +55,16 @@ technical:
   failed_breakdown_support_window: 20
   failed_breakdown_volume_multiplier: 1.5
   failed_breakdown_recovery_days: 2
+
+risk:
+  reduce_size_after_losses: 3
+  reduce_size_multiplier: 0.5
+  breakeven_r: 1.0
+  partial_exit_1_r: 2.0
+  partial_exit_1_pct: 50
+  partial_exit_2_r: 3.0
+  partial_exit_2_pct: 25
+  trail_remaining_pct: 25
+  trail_ema_days: 10
+  trail_atr_multiplier: 2.0
+  time_stop_days: 5
