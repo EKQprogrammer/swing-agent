@@ -10,3 +10,8 @@ data:
   tickers:
     - SPY
     - "^VIX"
+
+macro_regime:
+  vix_calm_max: 25
+  vix_panic_min: 35
+  spy_trend_ma_days: 200
