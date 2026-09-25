@@ -47,6 +47,7 @@ technical:
   atr_stop_multiplier: 2.0
   volume_avg_window: 20
   pullback_tolerance_pct: 1.5
+  pullback_rsi_max: 70.0
   breakout_min_days: 15
   breakout_max_days: 40
   breakout_width_min_pct: 5.0
@@ -68,3 +69,38 @@ risk:
   trail_ema_days: 10
   trail_atr_multiplier: 2.0
   time_stop_days: 5
+
+backtest:
+  # Backtest-only universe, separate from fundamental.universe (live RS calc).
+  # 30 liquid large caps across sectors: Tech, Financials, Healthcare, Consumer, Industrials, Energy.
+  tickers:
+    - AAPL
+    - MSFT
+    - GOOGL
+    - AMZN
+    - META
+    - NVDA
+    - AMD
+    - AVGO
+    - CRM
+    - ADBE
+    - JPM
+    - BAC
+    - V
+    - MA
+    - GS
+    - JNJ
+    - UNH
+    - LLY
+    - ABBV
+    - PG
+    - KO
+    - WMT
+    - COST
+    - HD
+    - NKE
+    - CAT
+    - HON
+    - UPS
+    - XOM
+    - CVX

@@ -98,7 +98,9 @@ def _detect_pullback(df: pd.DataFrame, cfg) -> dict | None:
     """Uptrend (price and fast EMA above slow EMA) pulls back to within
     pullback_tolerance_pct of either EMA on below-average volume, then
     resumes with today's close above yesterday's high on above-average
-    volume."""
+    volume. Entries with RSI >= pullback_rsi_max are rejected as chasing an
+    already-overbought move (added after train-period backtest analysis
+    showed this specific slice has negative expectancy -- see config.py)."""
     if len(df) < max(cfg.ema_slow, cfg.volume_avg_window) + 2:
         return None
 
@@ -107,6 +109,9 @@ def _detect_pullback(df: pd.DataFrame, cfg) -> dict | None:
 
     uptrend = today["ema_fast"] > today["ema_slow"] and today["close"] > today["ema_slow"]
     if not uptrend:
+        return None
+
+    if pd.notna(today["rsi"]) and today["rsi"] >= cfg.pullback_rsi_max:
         return None
 
     tol = cfg.pullback_tolerance_pct / 100.0

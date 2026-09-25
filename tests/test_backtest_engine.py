@@ -32,8 +32,14 @@ def _seed_market(conn: sqlite3.Connection) -> None:
 def _leadin_closes() -> tuple[list[float], float, float]:
     """Rising trend through day 247, a pullback dip on day 248, and the
     resume/trigger (entry) close on day 249 -- same recipe validated against
-    agents/technical.py in test_technical.py's pullback test."""
-    closes = [100 + i * 1.0 for i in range(LEAD)]
+    agents/technical.py in test_technical.py's pullback test. Sawtooth (not
+    a pure monotonic ramp): a monotonic ramp has zero losses so RSI pins
+    near 100, which now fails the pullback_rsi_max overbought gate."""
+    closes = []
+    price = 100.0
+    for i in range(LEAD):
+        price += -0.6 if i % 3 == 2 else 1.0
+        closes.append(price)
     dip = closes[-1] - 6
     closes.append(dip)
     entry_close = dip + 8

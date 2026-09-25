@@ -7,7 +7,12 @@ import pandas as pd
 
 from swing_agent.agents.macro_regime import MacroRegimeError, get_macro_regime
 from swing_agent.agents.risk_manager import compute_trade_plan
-from swing_agent.agents.technical import TechnicalError, get_technical_signal
+from swing_agent.agents.technical import (
+    _detect_breakout,
+    _detect_failed_breakdown,
+    _detect_pullback,
+    compute_indicators,
+)
 from swing_agent.config import load_config
 from swing_agent.logging_setup import get_logger
 
@@ -15,10 +20,10 @@ logger = get_logger(__name__)
 
 
 def _load_full_history(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
-    """Full ascending-date price history for `ticker`, plus a 10-day EMA and
-    14-day ATR used only for the trailing-stop exit rule (kept local to the
-    backtester rather than reusing agents/technical.py's compute_indicators,
-    which uses the Layer-3 EMA20/50 pair, not the Exit Rules' 10-day EMA)."""
+    """Full ascending-date RAW price history for `ticker`, plus the 10-day
+    EMA / 14-day ATR used only for the trailing-stop exit rule. Layer-3
+    entry-signal indicators (ema_fast/ema_slow/rsi/atr/avg_volume) are
+    deliberately NOT precomputed here -- see _scan_technical_signal_fast."""
     rows = conn.execute(
         "SELECT date, open, high, low, close, volume FROM prices WHERE ticker = ? ORDER BY date ASC",
         (ticker,),
@@ -33,6 +38,52 @@ def _load_full_history(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
     ).max(axis=1)
     df["atr14"] = tr.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
     return df
+
+
+def _scan_technical_signal_fast(raw_df: pd.DataFrame, technical_cfg, as_of_date: str) -> dict | None:
+    """Point-in-time setup scan matching agents/technical.py's
+    get_technical_signal() EXACTLY (same bounded lookback window, indicators
+    recomputed fresh on that window, same detector priority order) -- this
+    is a backtest-only performance path that avoids get_technical_signal's
+    per-call cost (a fresh SQL query AND a fresh config.yaml/.env reload on
+    every single call, which is correct and appropriately scoped for the
+    live daily-scan use case but far too slow once a backtest walks
+    thousands of trading days across dozens of tickers), while reusing its
+    actual private detector functions so the live and backtest decisions
+    never silently drift apart. The indicator window is recomputed fresh
+    per call, same as live -- confirmed by direct comparison that a
+    full-history "continuously computed" EMA differs numerically (by a
+    fraction of a percent) from get_technical_signal's windowed recompute,
+    which was enough to flip a handful of borderline setup triggers.
+    """
+    if raw_df.empty:
+        return None
+    lookback = max(technical_cfg.breakout_max_days, technical_cfg.failed_breakdown_support_window) + 60
+    end = raw_df["date"].searchsorted(as_of_date, side="right")
+    if end == 0:
+        return None
+    start = max(0, end - lookback)
+    window_df = raw_df.iloc[start:end]
+    if window_df.empty:
+        return None
+
+    indicator_df = compute_indicators(window_df, technical_cfg)
+    match = (
+        _detect_pullback(indicator_df, technical_cfg)
+        or _detect_breakout(indicator_df, technical_cfg)
+        or _detect_failed_breakdown(indicator_df, technical_cfg)
+    )
+    if match is None:
+        return None
+
+    today = indicator_df.iloc[-1]
+    match["indicators"] = {
+        "ema_fast": float(today["ema_fast"]) if pd.notna(today["ema_fast"]) else None,
+        "ema_slow": float(today["ema_slow"]) if pd.notna(today["ema_slow"]) else None,
+        "rsi": float(today["rsi"]) if pd.notna(today["rsi"]) else None,
+        "atr": float(today["atr"]) if pd.notna(today["atr"]) else None,
+    }
+    return match
 
 
 def _trading_dates(conn: sqlite3.Connection, start_date: str, end_date: str) -> list[str]:
@@ -56,6 +107,9 @@ class _OpenTrade:
     risk_per_share: float
     target_2r: float
     target_3r: float
+    entry_reasoning: str = ""
+    entry_indicators: dict = field(default_factory=dict)
+    macro_regime_at_entry: str = ""
     breakeven_moved: bool = False
     partial_2r_taken: bool = False
     partial_3r_taken: bool = False
@@ -77,6 +131,9 @@ def _close_trade_record(trade: _OpenTrade, exit_date: str, closed_trades: list[d
             "pnl": trade.realized_pnl,
             "r_multiple": r_multiple,
             "fills": trade.fills,
+            "entry_reasoning": trade.entry_reasoning,
+            "entry_indicators": trade.entry_indicators,
+            "macro_regime_at_entry": trade.macro_regime_at_entry,
         }
     )
 
@@ -203,19 +260,19 @@ def run_backtest(
             for ticker in tickers:
                 if ticker in open_trades or len(open_trades) >= cfg.account.max_positions:
                     continue
-                try:
-                    technical = get_technical_signal(conn, ticker, date)
-                except TechnicalError:
+                hist = histories.get(ticker)
+                if hist is None or hist.empty:
                     continue
-                if technical["verdict"] != "TRIGGER":
+                match = _scan_technical_signal_fast(hist, cfg.technical, date)
+                if match is None:
                     continue
 
                 risk = compute_trade_plan(
                     account_equity=equity,
-                    entry=technical["entry"],
-                    stop=technical["stop"],
+                    entry=match["entry"],
+                    stop=match["stop"],
                     position_size_modifier=macro["position_size_modifier"],
-                    half_size=technical["half_size"],
+                    half_size=match["half_size"],
                     risk_per_trade_pct=cfg.account.risk_per_trade_pct,
                     current_open_positions=len(open_trades),
                     max_positions=cfg.account.max_positions,
@@ -226,11 +283,14 @@ def run_backtest(
                     continue
 
                 open_trades[ticker] = _OpenTrade(
-                    ticker=ticker, setup=technical["setup"], entry_date=date, entry_day_index=day_index,
+                    ticker=ticker, setup=match["setup"], entry_date=date, entry_day_index=day_index,
                     entry_price=risk["entry"], current_stop=risk["stop"],
                     shares_original=risk["shares"], shares_remaining=risk["shares"],
                     risk_per_share=risk["risk_per_share"],
                     target_2r=risk["targets"]["2R"], target_3r=risk["targets"]["3R"],
+                    entry_reasoning=match["reasoning"],
+                    entry_indicators=match["indicators"],
+                    macro_regime_at_entry=macro["regime"],
                 )
 
         equity_curve.append({"date": date, "equity": equity})

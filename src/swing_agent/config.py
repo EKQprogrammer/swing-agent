@@ -61,6 +61,12 @@ class TechnicalConfig:
     atr_stop_multiplier: float = 2.0
     volume_avg_window: int = 20
     pullback_tolerance_pct: float = 1.5
+    # Refinement round 1 (train-period diagnostic, 2013-2019, 30-ticker
+    # universe): PULLBACK trades with entry RSI >= 70 showed negative avg R
+    # (-0.04 across 40 trades) vs +0.27 for the rest -- an overbought-chasing
+    # failure mode. Gating on it is expected to trade away ~4% of PULLBACK
+    # volume in exchange for removing its worst-performing slice.
+    pullback_rsi_max: float = 70.0
     breakout_min_days: int = 15
     breakout_max_days: int = 40
     breakout_width_min_pct: float = 5.0
@@ -87,6 +93,23 @@ class RiskConfig:
 
 
 @dataclass
+class BacktestConfig:
+    # Separate from fundamental.universe (which drives the LIVE relative-
+    # strength percentile calc) so backtest universe changes never silently
+    # reshape live RS scores.
+    tickers: list[str] = field(
+        default_factory=lambda: [
+            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD", "AVGO", "CRM", "ADBE",
+            "JPM", "BAC", "V", "MA", "GS",
+            "JNJ", "UNH", "LLY", "ABBV",
+            "PG", "KO", "WMT", "COST", "HD", "NKE",
+            "CAT", "HON", "UPS",
+            "XOM", "CVX",
+        ]
+    )
+
+
+@dataclass
 class Config:
     account: AccountConfig = field(default_factory=AccountConfig)
     macro_regime: MacroRegimeConfig = field(default_factory=MacroRegimeConfig)
@@ -94,6 +117,7 @@ class Config:
     fundamental: FundamentalConfig = field(default_factory=FundamentalConfig)
     technical: TechnicalConfig = field(default_factory=TechnicalConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    backtest: BacktestConfig = field(default_factory=BacktestConfig)
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:
@@ -113,6 +137,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     fundamental = FundamentalConfig(**raw.get("fundamental", {}))
     technical = TechnicalConfig(**raw.get("technical", {}))
     risk = RiskConfig(**raw.get("risk", {}))
+    backtest = BacktestConfig(**raw.get("backtest", {}))
 
     return Config(
         account=account,
@@ -121,4 +146,5 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         fundamental=fundamental,
         technical=technical,
         risk=risk,
+        backtest=backtest,
     )

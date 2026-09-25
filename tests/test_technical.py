@@ -19,7 +19,14 @@ def _price_df(dates, opens, highs, lows, closes, volumes) -> pd.DataFrame:
 def _seed_pullback(conn: sqlite3.Connection, ticker: str = "PBK") -> None:
     n = 90
     dates = pd.date_range("2023-01-01", periods=n, freq="D")
-    closes = [100 + i * 1.0 for i in range(n - 2)]
+    # A sawtooth uptrend (occasional small down-days), not a pure monotonic
+    # ramp -- a monotonic ramp has zero losses so RSI pins near 100, which
+    # is unrealistic and would now be rejected by the pullback_rsi_max gate.
+    closes = []
+    price = 100.0
+    for i in range(n - 2):
+        price += -0.6 if i % 3 == 2 else 1.0
+        closes.append(price)
     dip = closes[-1] - 6
     closes.append(dip)
     closes.append(dip + 8)

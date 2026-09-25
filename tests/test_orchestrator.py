@@ -46,7 +46,14 @@ def _seed_ticker(conn: sqlite3.Connection, ticker: str, trigger_pullback: bool, 
     the fake fundamentals fetch's filed_date."""
     dates = pd.date_range(end=FILED_DATE, periods=n, freq="D")
     if trigger_pullback:
-        closes = [100 + i * 1.0 for i in range(n - 2)]
+        # Sawtooth uptrend (occasional small down-days), not a pure
+        # monotonic ramp -- a monotonic ramp has zero losses so RSI pins
+        # near 100, which is unrealistic and now fails pullback_rsi_max.
+        closes = []
+        price = 100.0
+        for i in range(n - 2):
+            price += -0.6 if i % 3 == 2 else 1.0
+            closes.append(price)
         dip = closes[-1] - 6
         closes.append(dip)
         closes.append(dip + 8)
