@@ -5,7 +5,14 @@ import sqlite3
 import pandas as pd
 import pytest
 
-from swing_agent.agents.technical import TechnicalError, get_technical_signal, get_volatility_percentile
+from swing_agent.agents.technical import (
+    TechnicalError,
+    _detect_gap_fade,
+    compute_indicators,
+    get_technical_signal,
+    get_volatility_percentile,
+)
+from swing_agent.config import load_config
 from swing_agent.storage.db import upsert_prices
 
 
@@ -108,7 +115,11 @@ def test_failed_breakdown_setup_detected(memory_conn: sqlite3.Connection) -> Non
     assert result["half_size"] is True
 
 
-def _seed_gap_fade(conn: sqlite3.Connection, ticker: str = "GAP", n_lead: int = 45) -> None:
+def _gap_fade_indicator_df(n_lead: int = 45) -> pd.DataFrame:
+    """_detect_gap_fade is intentionally NOT wired into get_technical_signal
+    (train-period backtest testing showed consistently negative expectancy
+    -- see get_technical_signal's docstring), so it's unit-tested directly
+    against the function rather than through the live/backtest entry point."""
     dates = pd.date_range("2023-01-01", periods=n_lead + 1, freq="D")
     closes = [100.0] * n_lead
     opens = [100.0] * n_lead
@@ -122,25 +133,55 @@ def _seed_gap_fade(conn: sqlite3.Connection, ticker: str = "GAP", n_lead: int = 
     closes.append(97.5)  # green, closes in the upper half of [95, 98]
     volumes.append(2_000_000)  # panic volume, 2x avg
 
-    upsert_prices(conn, ticker, _price_df(dates, opens, highs, lows, closes, volumes))
+    df = pd.DataFrame(
+        {
+            "date": [d.strftime("%Y-%m-%d") for d in dates],
+            "open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes,
+        }
+    )
+    cfg = load_config().technical
+    return compute_indicators(df, cfg)
 
 
-def test_gap_fade_setup_detected(memory_conn: sqlite3.Connection) -> None:
-    _seed_gap_fade(memory_conn)
-    result = get_technical_signal(memory_conn, "GAP")
-    assert result["verdict"] == "TRIGGER"
-    assert result["setup"] == "GAP_FADE"
-    assert result["half_size"] is True
-    assert result["entry"] > result["stop"]
+def test_gap_fade_detector_fires_on_intended_pattern() -> None:
+    cfg = load_config().technical
+    df = _gap_fade_indicator_df()
+    match = _detect_gap_fade(df, cfg)
+    assert match is not None
+    assert match["setup"] == "GAP_FADE"
+    assert match["half_size"] is True
+    assert match["entry"] > match["stop"]
 
 
-def test_gap_fade_does_not_fire_on_normal_up_day(memory_conn: sqlite3.Connection) -> None:
+def test_gap_fade_detector_does_not_fire_on_normal_up_day() -> None:
     n = 46
     dates = pd.date_range("2023-01-01", periods=n, freq="D")
     closes = [100.0 + i * 0.1 for i in range(n)]  # no gap, mild drift, no volume spike
-    volumes = [1_000_000] * n
-    upsert_prices(memory_conn, "NOGAP", _price_df(dates, closes, closes, closes, closes, volumes))
-    result = get_technical_signal(memory_conn, "NOGAP")
+    df = pd.DataFrame(
+        {
+            "date": [d.strftime("%Y-%m-%d") for d in dates],
+            "open": closes, "high": closes, "low": closes, "close": closes,
+            "volume": [1_000_000] * n,
+        }
+    )
+    cfg = load_config().technical
+    indicator_df = compute_indicators(df, cfg)
+    assert _detect_gap_fade(indicator_df, cfg) is None
+
+
+def test_gap_fade_not_reachable_via_get_technical_signal(memory_conn: sqlite3.Connection) -> None:
+    """Confirms the detector is disabled in the active chain (not just
+    correct in isolation) -- feeding the exact same pattern through the
+    live/backtest entry point must NOT trigger GAP_FADE."""
+    n_lead = 45
+    dates = pd.date_range("2023-01-01", periods=n_lead + 1, freq="D")
+    closes = [100.0] * n_lead + [97.5]
+    opens = [100.0] * n_lead + [96.0]
+    highs = [100.0] * n_lead + [98.0]
+    lows = [100.0] * n_lead + [95.0]
+    volumes = [1_000_000] * n_lead + [2_000_000]
+    upsert_prices(memory_conn, "GAP", _price_df(dates, opens, highs, lows, closes, volumes))
+    result = get_technical_signal(memory_conn, "GAP")
     assert result["setup"] != "GAP_FADE"
 
 

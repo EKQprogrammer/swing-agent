@@ -13,7 +13,6 @@ from swing_agent.agents.technical import (
     _atr,
     _detect_breakout,
     _detect_failed_breakdown,
-    _detect_gap_fade,
     _detect_pullback,
     compute_indicators,
 )
@@ -73,11 +72,12 @@ def _scan_technical_signal_fast(raw_df: pd.DataFrame, technical_cfg, as_of_date:
         return None
 
     indicator_df = compute_indicators(window_df, technical_cfg)
+    # _detect_gap_fade intentionally excluded -- see get_technical_signal's
+    # docstring in agents/technical.py for the (tested and rejected) evidence.
     match = (
         _detect_pullback(indicator_df, technical_cfg)
         or _detect_breakout(indicator_df, technical_cfg)
         or _detect_failed_breakdown(indicator_df, technical_cfg)
-        or _detect_gap_fade(indicator_df, technical_cfg)
     )
     if match is None:
         return None
@@ -274,6 +274,7 @@ class _OpenTrade:
     entry_day_of_week: str = ""
     entry_is_expiry_friday: bool = False
     entry_days_to_earnings: int | None = None
+    entry_volatility_percentile: float | None = None
     breakeven_moved: bool = False
     partial_2r_taken: bool = False
     partial_3r_taken: bool = False
@@ -301,6 +302,7 @@ def _close_trade_record(trade: _OpenTrade, exit_date: str, closed_trades: list[d
             "entry_day_of_week": trade.entry_day_of_week,
             "entry_is_expiry_friday": trade.entry_is_expiry_friday,
             "entry_days_to_earnings": trade.entry_days_to_earnings,
+            "entry_volatility_percentile": trade.entry_volatility_percentile,
         }
     )
 
@@ -410,9 +412,10 @@ def run_backtest(
     if use_fundamentals:
         return_series = _build_return_series(histories, cfg.fundamental.rs_lookback_days)
 
-    atr_pct_series = {}
-    if cfg.risk.volatility_sizing_enabled:
-        atr_pct_series = _build_atr_pct_series(histories, cfg.technical.atr_period)
+    # Always precomputed (cheap, vectorized) -- recorded on every trade for
+    # diagnosis regardless of whether volatility_sizing_enabled actually
+    # gates position size with it.
+    atr_pct_series = _build_atr_pct_series(histories, cfg.technical.atr_period)
 
     open_trades: dict[str, _OpenTrade] = {}
     closed_trades: list[dict] = []
@@ -469,14 +472,16 @@ def run_backtest(
                     # earnings report imminent.
                     continue
 
-                elevated_volatility = False
-                if cfg.risk.volatility_sizing_enabled:
-                    vol_pct = _fast_volatility_percentile(
-                        atr_pct_series, ticker, date, cfg.risk.volatility_lookback_days
-                    )
-                    elevated_volatility = (
-                        vol_pct is not None and vol_pct >= cfg.risk.volatility_percentile_threshold
-                    )
+                # Computed unconditionally (cheap, bisect lookup) so it's
+                # available for diagnosis even when the sizing gate is off.
+                vol_pct = _fast_volatility_percentile(
+                    atr_pct_series, ticker, date, cfg.risk.volatility_lookback_days
+                )
+                elevated_volatility = (
+                    cfg.risk.volatility_sizing_enabled
+                    and vol_pct is not None
+                    and vol_pct >= cfg.risk.volatility_percentile_threshold
+                )
 
                 risk = compute_trade_plan(
                     account_equity=equity,
@@ -508,6 +513,7 @@ def run_backtest(
                     entry_day_of_week=calendar_ctx["entry_day_of_week"],
                     entry_is_expiry_friday=calendar_ctx["entry_is_expiry_friday"],
                     entry_days_to_earnings=days_to_earnings,
+                    entry_volatility_percentile=vol_pct,
                 )
 
         equity_curve.append({"date": date, "equity": equity})

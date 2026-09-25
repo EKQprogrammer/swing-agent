@@ -321,10 +321,11 @@ def get_technical_signal(
     conn: sqlite3.Connection, ticker: str, as_of_date: str | None = None
 ) -> dict:
     """Layer 3 — Technical Trigger. Loads point-in-time price history, computes
-    the EMA/RSI/ATR/volume indicator stack, and checks the four setups in
-    the order PULLBACK, BREAKOUT, FAILED_BREAKDOWN, GAP_FADE, returning the
-    first match. If none match, verdict is NO_SETUP (not an error) with
-    indicators still reported for visibility.
+    the EMA/RSI/ATR/volume indicator stack, and checks the three setups in
+    the order PULLBACK, BREAKOUT, FAILED_BREAKDOWN, returning the first
+    match (GAP_FADE was tested and rejected -- see _detect_gap_fade). If
+    none match, verdict is NO_SETUP (not an error) with indicators still
+    reported for visibility.
     """
     cfg = load_config().technical
     lookback = max(cfg.breakout_max_days, cfg.failed_breakdown_support_window) + 60
@@ -334,11 +335,17 @@ def get_technical_signal(
     resolved_date = df["date"].iloc[-1]
     today = df.iloc[-1]
 
+    # _detect_gap_fade is intentionally NOT in this chain: train-period
+    # backtest testing (Tier 1 item E) showed consistently negative
+    # expectancy (40-trade unconstrained sample: 17.5% win rate, -0.43R avg;
+    # 5-trade fundamentals-gated sample: -0.46R avg -- same direction both
+    # times). The function and its tests are kept as documented, tested,
+    # disabled reference in case real premarket-volume data ever becomes
+    # available to build the setup as originally specified.
     match = (
         _detect_pullback(df, cfg)
         or _detect_breakout(df, cfg)
         or _detect_failed_breakdown(df, cfg)
-        or _detect_gap_fade(df, cfg)
     )
 
     result = {
@@ -357,7 +364,7 @@ def get_technical_signal(
     if match is None:
         logger.info("Technical signal for %s as of %s: NO_SETUP", ticker, resolved_date)
         result.update({"verdict": "NO_SETUP", "setup": None, "entry": None, "stop": None,
-                        "half_size": False, "reasoning": "No PULLBACK/BREAKOUT/FAILED_BREAKDOWN/GAP_FADE setup detected."})
+                        "half_size": False, "reasoning": "No PULLBACK/BREAKOUT/FAILED_BREAKDOWN setup detected."})
         return result
 
     logger.info("Technical signal for %s as of %s: %s", ticker, resolved_date, match["setup"])
