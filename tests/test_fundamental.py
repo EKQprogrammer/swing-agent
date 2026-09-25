@@ -8,10 +8,11 @@ import pytest
 from swing_agent.agents.fundamental import (
     FundamentalError,
     calculate_relative_strength,
+    days_to_next_earnings,
     get_fundamental_verdict,
     get_fundamental_verdict_as_of,
 )
-from swing_agent.storage.db import upsert_fundamentals, upsert_prices
+from swing_agent.storage.db import upsert_earnings_dates, upsert_fundamentals, upsert_prices
 
 FILED_DATE = "2024-06-01"
 LOOKBACK = 252
@@ -188,3 +189,25 @@ def test_as_of_uses_only_filings_on_or_before_as_of_date(memory_conn: sqlite3.Co
     result = get_fundamental_verdict_as_of(memory_conn, "ACME", "2024-06-01", universe=[])
     assert result["roic"] == 2.0
     assert result["verdict"] == "REJECT"
+
+
+# --- days_to_next_earnings (Tier 1 item B, live path) ------------------------------
+
+
+def test_days_to_next_earnings_finds_the_next_one(memory_conn: sqlite3.Connection) -> None:
+    upsert_earnings_dates(memory_conn, "ACME", ["2024-01-15", "2024-04-20", "2024-07-22"])
+    assert days_to_next_earnings(memory_conn, "ACME", "2024-04-01") == 19
+
+
+def test_days_to_next_earnings_zero_on_report_day_itself(memory_conn: sqlite3.Connection) -> None:
+    upsert_earnings_dates(memory_conn, "ACME", ["2024-04-20"])
+    assert days_to_next_earnings(memory_conn, "ACME", "2024-04-20") == 0
+
+
+def test_days_to_next_earnings_none_after_last_known_report(memory_conn: sqlite3.Connection) -> None:
+    upsert_earnings_dates(memory_conn, "ACME", ["2024-01-15"])
+    assert days_to_next_earnings(memory_conn, "ACME", "2024-06-01") is None
+
+
+def test_days_to_next_earnings_none_for_unknown_ticker(memory_conn: sqlite3.Connection) -> None:
+    assert days_to_next_earnings(memory_conn, "NOPE", "2024-06-01") is None

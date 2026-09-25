@@ -5,7 +5,7 @@ import sqlite3
 import pandas as pd
 import pytest
 
-from swing_agent.agents.technical import TechnicalError, get_technical_signal
+from swing_agent.agents.technical import TechnicalError, get_technical_signal, get_volatility_percentile
 from swing_agent.storage.db import upsert_prices
 
 
@@ -142,6 +142,33 @@ def test_gap_fade_does_not_fire_on_normal_up_day(memory_conn: sqlite3.Connection
     upsert_prices(memory_conn, "NOGAP", _price_df(dates, closes, closes, closes, closes, volumes))
     result = get_technical_signal(memory_conn, "NOGAP")
     assert result["setup"] != "GAP_FADE"
+
+
+def test_volatility_percentile_spikes_on_a_wide_range_day(memory_conn: sqlite3.Connection) -> None:
+    n = 40
+    dates = pd.date_range("2023-01-01", periods=n, freq="D")
+    closes = [100.0] * n
+    highs = [100.0] * n
+    lows = [100.0] * n
+    # a single, much-wider-range day near the end -> should rank near the top
+    highs[-1] = 130.0
+    lows[-1] = 70.0
+    volumes = [1_000_000] * n
+    upsert_prices(memory_conn, "VOL", _price_df(dates, closes, highs, lows, closes, volumes))
+    pct = get_volatility_percentile(memory_conn, "VOL", lookback_days=252)
+    assert pct is not None
+    assert pct > 80
+
+
+def test_volatility_percentile_none_without_enough_history(memory_conn: sqlite3.Connection) -> None:
+    dates = pd.date_range("2023-01-01", periods=3, freq="D")
+    closes = [100.0, 101.0, 102.0]
+    upsert_prices(memory_conn, "SHORT", _price_df(dates, closes, closes, closes, closes, [1_000_000] * 3))
+    assert get_volatility_percentile(memory_conn, "SHORT", lookback_days=252) is None
+
+
+def test_volatility_percentile_none_for_unknown_ticker(memory_conn: sqlite3.Connection) -> None:
+    assert get_volatility_percentile(memory_conn, "NOPE", lookback_days=252) is None
 
 
 def test_no_setup_on_flat_thin_history(memory_conn: sqlite3.Connection) -> None:

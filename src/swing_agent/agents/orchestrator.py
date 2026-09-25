@@ -3,10 +3,10 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable
 
-from swing_agent.agents.fundamental import get_fundamental_verdict
+from swing_agent.agents.fundamental import days_to_next_earnings, get_fundamental_verdict
 from swing_agent.agents.macro_regime import get_macro_regime
 from swing_agent.agents.risk_manager import compute_trade_plan
-from swing_agent.agents.technical import get_technical_signal
+from swing_agent.agents.technical import get_technical_signal, get_volatility_percentile
 from swing_agent.config import load_config
 from swing_agent.data.eodhd import fetch_and_store_fundamentals
 from swing_agent.logging_setup import get_logger
@@ -63,6 +63,22 @@ def get_verdict(
             macro=macro, fundamental=fundamental, technical=technical,
         )
 
+    if cfg.fundamental.earnings_filter_enabled:
+        days_to_earnings = days_to_next_earnings(conn, ticker, technical["as_of_date"])
+        if days_to_earnings is not None and days_to_earnings <= cfg.fundamental.earnings_filter_days:
+            return _reject(
+                ticker, technical["as_of_date"], "technical",
+                f"Earnings report in {days_to_earnings} day(s) -- Tier 1 earnings filter.",
+                macro=macro, fundamental=fundamental, technical=technical,
+            )
+
+    elevated_volatility = False
+    if cfg.risk.volatility_sizing_enabled:
+        vol_pct = get_volatility_percentile(
+            conn, ticker, technical["as_of_date"], cfg.risk.volatility_lookback_days
+        )
+        elevated_volatility = vol_pct is not None and vol_pct >= cfg.risk.volatility_percentile_threshold
+
     risk = compute_trade_plan(
         account_equity=cfg.account.account_size,
         entry=technical["entry"],
@@ -77,6 +93,8 @@ def get_verdict(
         max_sector_pct=cfg.account.max_sector_pct,
         reduce_size_after_losses=cfg.risk.reduce_size_after_losses,
         reduce_size_multiplier=cfg.risk.reduce_size_multiplier,
+        elevated_volatility=elevated_volatility,
+        volatility_size_multiplier=cfg.risk.volatility_size_multiplier,
     )
     if risk["verdict"] != "APPROVE":
         return _reject(

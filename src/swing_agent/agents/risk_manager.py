@@ -19,6 +19,8 @@ def compute_trade_plan(
     max_sector_pct: float = 30.0,
     reduce_size_after_losses: int = 3,
     reduce_size_multiplier: float = 0.5,
+    elevated_volatility: bool = False,
+    volatility_size_multiplier: float = 0.5,
 ) -> dict:
     """Position sizing (Position Size = Account Equity x risk% / (Entry-Stop))
     plus the portfolio-level gates from CLAUDE.md's Position Sizing rules.
@@ -62,6 +64,10 @@ def compute_trade_plan(
         size_multiplier *= 0.5
     if consecutive_losses >= reduce_size_after_losses:
         size_multiplier *= reduce_size_multiplier
+    if elevated_volatility:
+        # Tier 1 item D: this ticker's own ATR% is unusually high relative
+        # to its trailing distribution (not just "high" in absolute terms).
+        size_multiplier *= volatility_size_multiplier
 
     base_risk_dollars = account_equity * (risk_per_trade_pct / 100.0)
     risk_dollars = base_risk_dollars * size_multiplier

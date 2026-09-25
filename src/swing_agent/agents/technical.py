@@ -363,3 +363,32 @@ def get_technical_signal(
     logger.info("Technical signal for %s as of %s: %s", ticker, resolved_date, match["setup"])
     result.update({"verdict": "TRIGGER", **match})
     return result
+
+
+def get_volatility_percentile(
+    conn: sqlite3.Connection, ticker: str, as_of_date: str | None = None, lookback_days: int = 252
+) -> float | None:
+    """Tier 1 item D (live path): percentile rank (0-100) of TODAY's ATR%
+    (atr/close*100) within `ticker`'s own trailing `lookback_days`
+    distribution of the same metric -- a ticker-specific volatility-regime
+    signal, distinct from the macro layer's VIX-driven CAUTIOUS/BEARISH
+    regime. None if there isn't enough history yet. See
+    backtest/engine.py's _fast_volatility_percentile for the backtest-fast
+    equivalent (same _atr formula, precomputed once per ticker there)."""
+    cfg = load_config().technical
+    try:
+        raw = _load_price_history(conn, ticker, as_of_date, lookback_days=lookback_days + cfg.atr_period + 5)
+    except TechnicalError:
+        return None
+    if len(raw) < cfg.atr_period + 2:
+        return None
+    df = raw.copy()
+    df["atr"] = _atr(df, cfg.atr_period)
+    atr_pct = (df["atr"] / df["close"] * 100).dropna()
+    if atr_pct.empty:
+        return None
+    current = atr_pct.iloc[-1]
+    if len(atr_pct) < 2:
+        return 100.0
+    rank = (atr_pct < current).sum()
+    return float(rank / (len(atr_pct) - 1) * 100)

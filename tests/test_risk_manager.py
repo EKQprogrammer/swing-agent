@@ -41,6 +41,16 @@ def test_reduced_size_after_three_losses() -> None:
     assert result["shares"] == 10  # $100 * 0.5 / $5
 
 
+def test_elevated_volatility_reduces_size() -> None:
+    result = compute_trade_plan(**_base_kwargs(elevated_volatility=True, volatility_size_multiplier=0.5))
+    assert result["shares"] == 10  # $100 * 0.5 / $5
+
+
+def test_elevated_volatility_off_by_default_full_size() -> None:
+    result = compute_trade_plan(**_base_kwargs())
+    assert result["shares"] == 20  # unaffected unless elevated_volatility=True
+
+
 def test_bearish_regime_rejects() -> None:
     result = compute_trade_plan(**_base_kwargs(position_size_modifier=0.0))
     assert result["verdict"] == "REJECT"

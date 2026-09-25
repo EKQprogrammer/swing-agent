@@ -7,7 +7,7 @@ from typing import Callable
 from swing_agent.config import load_config
 from swing_agent.data.eodhd import fetch_and_store_fundamentals
 from swing_agent.logging_setup import get_logger
-from swing_agent.storage.db import get_cached_fundamentals, get_fundamentals_as_of
+from swing_agent.storage.db import get_cached_fundamentals, get_earnings_dates, get_fundamentals_as_of
 
 logger = get_logger(__name__)
 
@@ -15,6 +15,25 @@ logger = get_logger(__name__)
 class FundamentalError(RuntimeError):
     """Raised when fundamentals data cannot be obtained (no fresh cache and no
     successful live fetch) or when relative strength cannot be computed."""
+
+
+def days_to_next_earnings(conn: sqlite3.Connection, ticker: str, as_of_date: str) -> int | None:
+    """Tier 1 item B (live path): calendar days from as_of_date to the next
+    known earnings report date on/after it, or None if none is known (no
+    earnings data for this ticker, or as_of_date is after the last known
+    report). See backtest/engine.py's _days_to_next_earnings for the
+    backtest-fast equivalent (same logic, precomputed sorted list there)."""
+    import bisect
+    from datetime import date as _date
+
+    dates = get_earnings_dates(conn, ticker)
+    if not dates:
+        return None
+    idx = bisect.bisect_left(dates, as_of_date)
+    if idx >= len(dates):
+        return None
+    next_date = _date.fromisoformat(dates[idx])
+    return (next_date - _date.fromisoformat(as_of_date)).days
 
 
 def calculate_relative_strength(

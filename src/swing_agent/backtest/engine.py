@@ -10,6 +10,7 @@ from swing_agent.agents.fundamental import _evaluate_thresholds
 from swing_agent.agents.macro_regime import MacroRegimeError, get_macro_regime
 from swing_agent.agents.risk_manager import compute_trade_plan
 from swing_agent.agents.technical import (
+    _atr,
     _detect_breakout,
     _detect_failed_breakdown,
     _detect_gap_fade,
@@ -18,7 +19,7 @@ from swing_agent.agents.technical import (
 )
 from swing_agent.config import load_config
 from swing_agent.logging_setup import get_logger
-from swing_agent.storage.db import get_fundamentals_as_of
+from swing_agent.storage.db import get_earnings_dates, get_fundamentals_as_of
 
 logger = get_logger(__name__)
 
@@ -87,6 +88,9 @@ def _scan_technical_signal_fast(raw_df: pd.DataFrame, technical_cfg, as_of_date:
         "ema_slow": float(today["ema_slow"]) if pd.notna(today["ema_slow"]) else None,
         "rsi": float(today["rsi"]) if pd.notna(today["rsi"]) else None,
         "atr": float(today["atr"]) if pd.notna(today["atr"]) else None,
+        "pivot_pp": float(today["pivot_pp"]) if pd.notna(today["pivot_pp"]) else None,
+        "pivot_s1": float(today["pivot_s1"]) if pd.notna(today["pivot_s1"]) else None,
+        "pivot_r1": float(today["pivot_r1"]) if pd.notna(today["pivot_r1"]) else None,
     }
     return match
 
@@ -139,6 +143,47 @@ def _fast_relative_strength(
     return rank / (len(sorted_vals) - 1) * 100
 
 
+def _build_atr_pct_series(histories: dict[str, pd.DataFrame], atr_period: int) -> dict[str, tuple[list, list]]:
+    """Precomputes each ticker's full ATR% (atr/close*100) series ONCE,
+    reusing agents/technical.py's actual _atr formula (not a re-derived
+    copy), for Tier 1 item D's fast point-in-time volatility-percentile
+    lookups -- same precompute-once pattern as the other backtest-fast
+    helpers above."""
+    result: dict[str, tuple[list, list]] = {}
+    for ticker, df in histories.items():
+        if df.empty:
+            continue
+        atr = _atr(df, atr_period)
+        atr_pct = atr / df["close"] * 100
+        result[ticker] = (df["date"].tolist(), atr_pct.tolist())
+    return result
+
+
+def _fast_volatility_percentile(
+    atr_pct_series: dict[str, tuple[list, list]], ticker: str, as_of_date: str, lookback_days: int
+) -> float | None:
+    """Percentile rank (0-100) of TODAY's ATR% within `ticker`'s OWN trailing
+    `lookback_days` ATR% distribution (ticker-specific volatility regime,
+    distinct from the macro layer's VIX-driven CAUTIOUS/BEARISH regime).
+    None if there isn't enough history yet."""
+    series = atr_pct_series.get(ticker)
+    if series is None:
+        return None
+    dates, values = series
+    idx = bisect.bisect_right(dates, as_of_date) - 1
+    if idx < 0:
+        return None
+    current = values[idx]
+    if current != current:  # NaN
+        return None
+    window_start = max(0, idx - lookback_days + 1)
+    window = [v for v in values[window_start:idx + 1] if v == v]
+    if len(window) < 2:
+        return 100.0
+    rank = sum(1 for v in window if v < current)
+    return rank / (len(window) - 1) * 100
+
+
 def _fundamental_verdict_fast(
     conn: sqlite3.Connection,
     ticker: str,
@@ -164,6 +209,22 @@ def _fundamental_verdict_fast(
 
     verdict, failed, reasoning = _evaluate_thresholds(row, rs, fcfg)
     return {"verdict": verdict, "failed_checks": failed, "reasoning": reasoning}
+
+
+def _days_to_next_earnings(sorted_report_dates: list[str], as_of_date: str) -> int | None:
+    """Tier 1 item B's prerequisite: calendar days from as_of_date to the
+    next known report date on/after it, or None if none is known (either no
+    earnings data for this ticker, or as_of_date is after the last known
+    report). Diagnostic-only for now -- not gating any entry."""
+    if not sorted_report_dates:
+        return None
+    idx = bisect.bisect_left(sorted_report_dates, as_of_date)
+    if idx >= len(sorted_report_dates):
+        return None
+    from datetime import date as _date
+
+    next_date = _date.fromisoformat(sorted_report_dates[idx])
+    return (next_date - _date.fromisoformat(as_of_date)).days
 
 
 def _entry_calendar_context(date: str) -> dict:
@@ -212,6 +273,7 @@ class _OpenTrade:
     macro_regime_at_entry: str = ""
     entry_day_of_week: str = ""
     entry_is_expiry_friday: bool = False
+    entry_days_to_earnings: int | None = None
     breakeven_moved: bool = False
     partial_2r_taken: bool = False
     partial_3r_taken: bool = False
@@ -238,6 +300,7 @@ def _close_trade_record(trade: _OpenTrade, exit_date: str, closed_trades: list[d
             "macro_regime_at_entry": trade.macro_regime_at_entry,
             "entry_day_of_week": trade.entry_day_of_week,
             "entry_is_expiry_friday": trade.entry_is_expiry_friday,
+            "entry_days_to_earnings": trade.entry_days_to_earnings,
         }
     )
 
@@ -340,11 +403,16 @@ def run_backtest(
 
     histories = {t: _load_full_history(conn, t) for t in tickers}
     dates = _trading_dates(conn, start_date, end_date)
+    earnings_by_ticker = {t: get_earnings_dates(conn, t) for t in tickers}
 
     return_series = {}
     rs_universe = fundamentals_universe if fundamentals_universe is not None else tickers
     if use_fundamentals:
         return_series = _build_return_series(histories, cfg.fundamental.rs_lookback_days)
+
+    atr_pct_series = {}
+    if cfg.risk.volatility_sizing_enabled:
+        atr_pct_series = _build_atr_pct_series(histories, cfg.technical.atr_period)
 
     open_trades: dict[str, _OpenTrade] = {}
     closed_trades: list[dict] = []
@@ -391,6 +459,25 @@ def run_backtest(
                     # FundamentalConfig's comment for the backtest evidence.
                     continue
 
+                days_to_earnings = _days_to_next_earnings(earnings_by_ticker.get(ticker, []), date)
+                if (
+                    cfg.fundamental.earnings_filter_enabled
+                    and days_to_earnings is not None
+                    and days_to_earnings <= cfg.fundamental.earnings_filter_days
+                ):
+                    # Tier 1 item B, gated: don't open a new position with an
+                    # earnings report imminent.
+                    continue
+
+                elevated_volatility = False
+                if cfg.risk.volatility_sizing_enabled:
+                    vol_pct = _fast_volatility_percentile(
+                        atr_pct_series, ticker, date, cfg.risk.volatility_lookback_days
+                    )
+                    elevated_volatility = (
+                        vol_pct is not None and vol_pct >= cfg.risk.volatility_percentile_threshold
+                    )
+
                 risk = compute_trade_plan(
                     account_equity=equity,
                     entry=match["entry"],
@@ -402,6 +489,8 @@ def run_backtest(
                     max_positions=cfg.account.max_positions,
                     reduce_size_after_losses=cfg.risk.reduce_size_after_losses,
                     reduce_size_multiplier=cfg.risk.reduce_size_multiplier,
+                    elevated_volatility=elevated_volatility,
+                    volatility_size_multiplier=cfg.risk.volatility_size_multiplier,
                 )
                 if risk["verdict"] != "APPROVE":
                     continue
@@ -418,6 +507,7 @@ def run_backtest(
                     macro_regime_at_entry=macro["regime"],
                     entry_day_of_week=calendar_ctx["entry_day_of_week"],
                     entry_is_expiry_friday=calendar_ctx["entry_is_expiry_friday"],
+                    entry_days_to_earnings=days_to_earnings,
                 )
 
         equity_curve.append({"date": date, "equity": equity})

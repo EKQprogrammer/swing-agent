@@ -29,6 +29,8 @@ fundamental:
   rs_lookback_days: 252
   excluded_setups:
     - BREAKOUT
+  earnings_filter_enabled: false
+  earnings_filter_days: 7
   universe:
     - SPY
     - AAPL
@@ -73,6 +75,10 @@ risk:
   trail_ema_days: 10
   trail_atr_multiplier: 2.0
   time_stop_days: 5
+  volatility_sizing_enabled: false
+  volatility_percentile_threshold: 80.0
+  volatility_size_multiplier: 0.5
+  volatility_lookback_days: 252
 
 backtest:
   # Backtest-only universe, separate from fundamental.universe (live RS calc).

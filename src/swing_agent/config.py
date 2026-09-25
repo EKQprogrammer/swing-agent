@@ -51,6 +51,12 @@ class FundamentalConfig:
     # than a pullback-in-uptrend entry. Applied to both the live orchestrator
     # and the backtest engine so they can't silently diverge.
     excluded_setups: list[str] = field(default_factory=lambda: ["BREAKOUT"])
+    # Tier 1 item B: earnings calendar filter (Pezim's rule -- avoid holding
+    # through an earnings announcement). Off by default -- gated pending
+    # train-period diagnostic evidence that our own data supports it, same
+    # discipline as every other Tier 1 item.
+    earnings_filter_enabled: bool = False
+    earnings_filter_days: int = 7
     # Placeholder liquid large-cap universe for relative-strength ranking and
     # fetch_fundamentals.py's default ticker list. Expand/replace with the
     # actual scan watchlist in a later phase.
@@ -107,6 +113,16 @@ class RiskConfig:
     trail_ema_days: int = 10
     trail_atr_multiplier: float = 2.0
     time_stop_days: int = 5
+    # Tier 1 item D: position sizing from volatility. Off by default --
+    # gated pending train-period diagnostic evidence, same discipline as the
+    # earnings filter. When enabled, a ticker's OWN elevated ATR% (vs its
+    # trailing rs_lookback_days-scale distribution, not just "high" in
+    # absolute terms) triggers an additional size cut -- distinct from the
+    # macro layer's VIX-driven CAUTIOUS/BEARISH regime.
+    volatility_sizing_enabled: bool = False
+    volatility_percentile_threshold: float = 80.0
+    volatility_size_multiplier: float = 0.5
+    volatility_lookback_days: int = 252
 
 
 @dataclass
