@@ -6,6 +6,7 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/scans/
 !data/.gitkeep
 .pytest_cache/
 *.egg-info/
