@@ -147,6 +147,28 @@ def get_cached_fundamentals(conn: sqlite3.Connection, ticker: str, ttl_days: int
     return data
 
 
+def get_fundamentals_as_of(conn: sqlite3.Connection, ticker: str, as_of_date: str) -> dict | None:
+    """Point-in-time fundamentals lookup for BACKTESTING: the most recent
+    row with filed_date <= as_of_date, regardless of fetched_at/TTL (unlike
+    get_cached_fundamentals, which is for the live 7-day-TTL-cache path).
+    Requires the fundamentals table to already hold historical rows -- see
+    data/eodhd.py's fetch_and_store_historical_fundamentals(). Returns None
+    if no fundamentals exist for the ticker as of that date yet (e.g.
+    pre-IPO or before EODHD's earliest filing)."""
+    row = conn.execute(
+        f"""
+        SELECT {', '.join(_FUNDAMENTALS_COLUMNS)}
+        FROM fundamentals
+        WHERE ticker = ? AND filed_date <= ?
+        ORDER BY filed_date DESC LIMIT 1
+        """,
+        (ticker, as_of_date),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(_FUNDAMENTALS_COLUMNS, row))
+
+
 def get_latest_date(conn: sqlite3.Connection, table: str, key_col: str, key_val: str) -> str | None:
     """Returns MAX(date) for the given key. `table`/`key_col` are restricted to
     an allow-list, never interpolated from arbitrary caller input, to avoid

@@ -41,6 +41,16 @@ class FundamentalConfig:
     avg_volume_min: float = 500_000
     ttl_days: int = 7
     rs_lookback_days: int = 252
+    # Refinement round 2 (train+validation, 2013-2022, 30-ticker universe,
+    # fundamentals-gated): BREAKOUT setups showed consistent negative avg R
+    # when combined with Layer 2 (train-only 45 trades: -0.167R; train+
+    # validation 68 trades: -0.055R) while PULLBACK/FAILED_BREAKDOWN stayed
+    # positive in both windows. Hypothesis: entering a fresh breakout on a
+    # stock that already cleared relative_strength_min (i.e. already
+    # strongly outperformed) is late-stage momentum with more reversal risk
+    # than a pullback-in-uptrend entry. Applied to both the live orchestrator
+    # and the backtest engine so they can't silently diverge.
+    excluded_setups: list[str] = field(default_factory=lambda: ["BREAKOUT"])
     # Placeholder liquid large-cap universe for relative-strength ranking and
     # fetch_fundamentals.py's default ticker list. Expand/replace with the
     # actual scan watchlist in a later phase.

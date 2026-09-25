@@ -2,12 +2,12 @@
 
 Usage:
     python scripts/run_backtest.py --start 2022-01-01 --end 2024-12-31 [--tickers AAPL MSFT]
-        [--account-equity 13615] [--narratives] [--json]
+        [--account-equity 13615] [--use-fundamentals] [--narratives] [--json]
 
-NOTE: Layer 2 (fundamentals) is intentionally not applied in backtests --
-see swing_agent.backtest.engine.run_backtest's docstring for why (no $0
-point-in-time historical fundamentals source exists). This backtests the
-macro + technical signal in isolation.
+--use-fundamentals enables Layer 2 (point-in-time fundamentals, via EODHD --
+requires scripts/fetch_fundamentals.py --historical to have been run first
+for the tickers in this backtest). Off by default: without it, every ticker
+is macro+technical only, matching all earlier backtests in this project.
 """
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ def main() -> None:
     parser.add_argument("--end", required=True, help="YYYY-MM-DD")
     parser.add_argument("--tickers", nargs="+", default=None)
     parser.add_argument("--account-equity", type=float, default=None, help="Starting equity in USD (default: config.yaml's account.account_size)")
+    parser.add_argument("--use-fundamentals", action="store_true", help="Enable Layer 2 (point-in-time fundamentals, requires prior --historical backfill)")
     parser.add_argument("--narratives", action="store_true", help="Add a plain-English 'why did I win/lose' narrative to each trade")
     parser.add_argument("--db", default=None)
     parser.add_argument("--config", default="config.yaml")
@@ -53,7 +54,10 @@ def main() -> None:
 
     conn = get_connection(db_path)
     try:
-        result = run_backtest(conn, tickers, args.start, args.end, account_equity=args.account_equity)
+        result = run_backtest(
+            conn, tickers, args.start, args.end,
+            account_equity=args.account_equity, use_fundamentals=args.use_fundamentals,
+        )
     finally:
         conn.close()
 

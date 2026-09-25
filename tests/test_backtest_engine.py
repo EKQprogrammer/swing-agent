@@ -5,7 +5,18 @@ import sqlite3
 import pandas as pd
 
 from swing_agent.backtest.engine import run_backtest
-from swing_agent.storage.db import upsert_prices
+from swing_agent.storage.db import upsert_fundamentals, upsert_prices
+
+PASSING_FUNDAMENTALS = {
+    "filed_date": "2023-06-01",
+    "roic": 15.0,
+    "fcf": 1_000_000.0,
+    "fcf_margin": 10.0,
+    "revenue_growth_yoy": 8.0,
+    "earnings_growth_yoy": 12.0,
+    "price": 50.0,
+    "avg_daily_volume": 1_000_000,
+}
 
 N = 500
 ALL_DATES = pd.date_range("2023-01-01", periods=N, freq="D")
@@ -117,3 +128,72 @@ def test_no_trades_when_no_setup_ever_triggers(memory_conn: sqlite3.Connection) 
     result = run_backtest(memory_conn, ["FLT"], str(ALL_DATES[240].date()), str(ALL_DATES[260].date()))
     assert result["trades"] == []
     assert len(result["equity_curve"]) > 0
+
+
+def _seed_pullback_ticker(conn: sqlite3.Connection, ticker: str) -> None:
+    closes, dip, entry_close = _leadin_closes()
+    jump_close = entry_close + 50
+    closes.append(jump_close)
+    closes.extend([jump_close] * 5)
+    opens, highs, lows = list(closes), list(closes), list(closes)
+    highs[LEAD] = dip + 1
+    lows[LEAD] = dip - 1
+    volumes = [1_000_000] * LEAD + [600_000, 1_800_000] + [1_000_000] * (len(closes) - LEAD - 2)
+    upsert_prices(conn, ticker, _price_df(ALL_DATES[: len(closes)], opens, highs, lows, closes, volumes))
+
+
+def test_use_fundamentals_false_ignores_missing_fundamentals(memory_conn: sqlite3.Connection) -> None:
+    _seed_market(memory_conn)
+    _seed_pullback_ticker(memory_conn, "TST")
+    # default use_fundamentals=False: same behavior as before this feature existed
+    result = run_backtest(memory_conn, ["TST"], str(ALL_DATES[240].date()), str(ALL_DATES[254].date()))
+    assert len(result["trades"]) == 1
+
+
+def test_use_fundamentals_true_blocks_trade_without_data(memory_conn: sqlite3.Connection) -> None:
+    _seed_market(memory_conn)
+    _seed_pullback_ticker(memory_conn, "TST")
+    # no fundamentals row seeded at all -> Layer 2 rejects every day
+    result = run_backtest(
+        memory_conn, ["TST"], str(ALL_DATES[240].date()), str(ALL_DATES[254].date()), use_fundamentals=True
+    )
+    assert result["trades"] == []
+
+
+def _patch_small_rs_lookback(monkeypatch) -> None:
+    """The pullback fixture's entry sits at day 249 of its own price series
+    (only 250 rows exist by then), which isn't enough for the real
+    config.yaml's 252-day RS lookback -- shrink it for these tests so the RS
+    calc itself succeeds and the fundamentals threshold logic is what's
+    actually being tested, not an incidental history-length failure."""
+    from swing_agent.config import load_config as real_load_config
+
+    def small_lookback(*a, **k):
+        cfg = real_load_config(*a, **k)
+        cfg.fundamental.rs_lookback_days = 10
+        return cfg
+
+    monkeypatch.setattr("swing_agent.backtest.engine.load_config", small_lookback)
+
+
+def test_use_fundamentals_true_allows_trade_with_passing_fundamentals(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _patch_small_rs_lookback(monkeypatch)
+    _seed_market(memory_conn)
+    _seed_pullback_ticker(memory_conn, "TST")
+    upsert_fundamentals(memory_conn, {**PASSING_FUNDAMENTALS, "ticker": "TST"})
+    result = run_backtest(
+        memory_conn, ["TST"], str(ALL_DATES[240].date()), str(ALL_DATES[254].date()), use_fundamentals=True
+    )
+    assert len(result["trades"]) == 1
+
+
+def test_use_fundamentals_true_blocks_trade_with_failing_fundamentals(memory_conn: sqlite3.Connection, monkeypatch) -> None:
+    _patch_small_rs_lookback(monkeypatch)
+    _seed_market(memory_conn)
+    _seed_pullback_ticker(memory_conn, "TST")
+    weak = {**PASSING_FUNDAMENTALS, "roic": 2.0, "ticker": "TST"}  # fails roic_min
+    upsert_fundamentals(memory_conn, weak)
+    result = run_backtest(
+        memory_conn, ["TST"], str(ALL_DATES[240].date()), str(ALL_DATES[254].date()), use_fundamentals=True
+    )
+    assert result["trades"] == []

@@ -53,6 +53,15 @@ def get_verdict(
             ticker, technical["as_of_date"], "technical", technical["reasoning"],
             macro=macro, fundamental=fundamental, technical=technical,
         )
+    if technical["setup"] in cfg.fundamental.excluded_setups:
+        # Data-driven exclusion (config.fundamental.excluded_setups): see
+        # FundamentalConfig's comment for the backtest evidence.
+        return _reject(
+            ticker, technical["as_of_date"], "technical",
+            f"{technical['setup']} is excluded when combined with Layer 2 fundamentals gating "
+            "(backtest showed negative expectancy for this combination).",
+            macro=macro, fundamental=fundamental, technical=technical,
+        )
 
     risk = compute_trade_plan(
         account_equity=cfg.account.account_size,

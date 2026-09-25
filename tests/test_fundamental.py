@@ -9,6 +9,7 @@ from swing_agent.agents.fundamental import (
     FundamentalError,
     calculate_relative_strength,
     get_fundamental_verdict,
+    get_fundamental_verdict_as_of,
 )
 from swing_agent.storage.db import upsert_fundamentals, upsert_prices
 
@@ -147,3 +148,43 @@ def test_stale_cache_triggers_refetch(memory_conn: sqlite3.Connection) -> None:
 
     get_fundamental_verdict(memory_conn, "ACME", fetch_fn=fetch_fn)
     assert call_log == ["ACME", "ACME"]  # stale cache forced a re-fetch
+
+
+# --- get_fundamental_verdict_as_of (point-in-time, backtest path) -----------------
+
+
+def test_as_of_pass_when_fundamentals_row_exists_and_clears_thresholds(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=0.50)
+    upsert_fundamentals(memory_conn, {**PASSING_METRICS, "ticker": "ACME"})
+    result = get_fundamental_verdict_as_of(memory_conn, "ACME", FILED_DATE, universe=[])
+    assert result["verdict"] == "PASS"
+    assert result["failed_checks"] == []
+
+
+def test_as_of_reject_on_weak_metric(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=0.50)
+    weak = {**PASSING_METRICS, "roic": 2.0, "ticker": "ACME"}
+    upsert_fundamentals(memory_conn, weak)
+    result = get_fundamental_verdict_as_of(memory_conn, "ACME", FILED_DATE, universe=[])
+    assert result["verdict"] == "REJECT"
+    assert "roic" in result["failed_checks"]
+
+
+def test_as_of_no_data_yet_rejects_without_raising(memory_conn: sqlite3.Connection) -> None:
+    # No fundamentals row at all for this ticker (e.g. pre-IPO) -- must be a
+    # clean REJECT, not an exception, so a backtest loop can just skip it.
+    result = get_fundamental_verdict_as_of(memory_conn, "NOPE", FILED_DATE, universe=[])
+    assert result["verdict"] == "REJECT"
+    assert result["failed_checks"] == ["no_fundamentals_data"]
+
+
+def test_as_of_uses_only_filings_on_or_before_as_of_date(memory_conn: sqlite3.Connection) -> None:
+    _seed_return_series(memory_conn, "ACME", total_return=0.50, end_date="2024-06-01")
+    # an OLDER, weak filing and a NEWER, strong filing that hasn't "happened" yet
+    upsert_fundamentals(memory_conn, {**PASSING_METRICS, "ticker": "ACME", "filed_date": "2023-01-01", "roic": 2.0})
+    upsert_fundamentals(memory_conn, {**PASSING_METRICS, "ticker": "ACME", "filed_date": "2025-06-01", "roic": 20.0})
+
+    # as of mid-2024, only the 2023 (weak) filing should be visible
+    result = get_fundamental_verdict_as_of(memory_conn, "ACME", "2024-06-01", universe=[])
+    assert result["roic"] == 2.0
+    assert result["verdict"] == "REJECT"

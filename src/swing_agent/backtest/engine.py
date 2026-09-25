@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import bisect
 import sqlite3
 from dataclasses import dataclass, field
 
 import pandas as pd
 
+from swing_agent.agents.fundamental import _evaluate_thresholds
 from swing_agent.agents.macro_regime import MacroRegimeError, get_macro_regime
 from swing_agent.agents.risk_manager import compute_trade_plan
 from swing_agent.agents.technical import (
@@ -15,6 +17,7 @@ from swing_agent.agents.technical import (
 )
 from swing_agent.config import load_config
 from swing_agent.logging_setup import get_logger
+from swing_agent.storage.db import get_fundamentals_as_of
 
 logger = get_logger(__name__)
 
@@ -84,6 +87,81 @@ def _scan_technical_signal_fast(raw_df: pd.DataFrame, technical_cfg, as_of_date:
         "atr": float(today["atr"]) if pd.notna(today["atr"]) else None,
     }
     return match
+
+
+def _build_return_series(histories: dict[str, pd.DataFrame], lookback_days: int) -> dict[str, tuple[list, list]]:
+    """Precomputes each ticker's trailing `lookback_days` % return series
+    ONCE (vectorized pandas), for fast point-in-time relative-strength
+    lookups during backtesting -- avoids agents/fundamental.py's
+    calculate_relative_strength doing a fresh bounded SQL query per
+    (ticker, universe-member, day), which would be prohibitively slow at
+    30-ticker x multi-year backtest scale (the same class of problem
+    _scan_technical_signal_fast already solves for Layer 3)."""
+    result: dict[str, tuple[list, list]] = {}
+    for ticker, df in histories.items():
+        if df.empty:
+            continue
+        returns = (df["close"] / df["close"].shift(lookback_days) - 1.0)
+        result[ticker] = (df["date"].tolist(), returns.tolist())
+    return result
+
+
+def _fast_relative_strength(
+    return_series: dict[str, tuple[list, list]], ticker: str, universe: list[str], as_of_date: str
+) -> float | None:
+    """Point-in-time RS percentile rank using the precomputed series above
+    (bisect lookup, O(log n)) instead of a fresh SQL scan. Returns None
+    (not a raise) if the ticker itself lacks enough history yet -- the
+    backtest loop just skips that ticker for that day, same as any other
+    missing-data case."""
+    members = list(dict.fromkeys([ticker, *universe]))
+    values: dict[str, float] = {}
+    for member in members:
+        series = return_series.get(member)
+        if series is None:
+            continue
+        dates, returns = series
+        idx = bisect.bisect_right(dates, as_of_date) - 1
+        if idx < 0:
+            continue
+        v = returns[idx]
+        if v == v:  # filter NaN
+            values[member] = v
+
+    if ticker not in values:
+        return None
+    if len(values) < 2:
+        return 100.0
+    sorted_vals = sorted(values.values())
+    rank = sorted_vals.index(values[ticker])
+    return rank / (len(sorted_vals) - 1) * 100
+
+
+def _fundamental_verdict_fast(
+    conn: sqlite3.Connection,
+    ticker: str,
+    as_of_date: str,
+    return_series: dict[str, tuple[list, list]],
+    rs_universe: list[str],
+    fcfg,
+) -> dict:
+    """Backtest-only Layer 2 check: point-in-time fundamentals row (small,
+    indexed table -- a per-call SQL lookup here is cheap, unlike Layer 3's
+    indicator recomputation) + the fast RS lookup above, evaluated through
+    agents/fundamental.py's actual _evaluate_thresholds so live and backtest
+    can never silently disagree on what counts as a PASS. fcfg is passed in
+    (not reloaded via load_config() per call) to avoid repeating the
+    config.yaml/.env file-read cost on every ticker-day."""
+    row = get_fundamentals_as_of(conn, ticker, as_of_date)
+    if row is None:
+        return {"verdict": "REJECT", "failed_checks": ["no_fundamentals_data"]}
+
+    rs = _fast_relative_strength(return_series, ticker, rs_universe, as_of_date)
+    if rs is None:
+        return {"verdict": "REJECT", "failed_checks": ["insufficient_price_history_for_rs"]}
+
+    verdict, failed, reasoning = _evaluate_thresholds(row, rs, fcfg)
+    return {"verdict": verdict, "failed_checks": failed, "reasoning": reasoning}
 
 
 def _trading_dates(conn: sqlite3.Connection, start_date: str, end_date: str) -> list[str]:
@@ -213,25 +291,34 @@ def run_backtest(
     start_date: str,
     end_date: str,
     account_equity: float | None = None,
+    use_fundamentals: bool = False,
+    fundamentals_universe: list[str] | None = None,
 ) -> dict:
     """Walk-forward simulation over [start_date, end_date] on the SPY trading
-    calendar. Layers 1 (macro) and 3 (technical) are fully point-in-time
+    calendar. Layers 1 (macro) and 3 (technical) are always point-in-time
     backtestable from locally stored price/macro history.
 
-    Layer 2 (fundamentals) is INTENTIONALLY NOT applied here: FMP's free tier
-    only exposes current/TTM data, not a multi-year point-in-time history, so
-    there is no $0-budget way to honor CLAUDE.md's "no look-ahead in
-    backtests" rule for fundamentals (using today's cached fundamentals for a
-    2020 entry decision would itself be a look-ahead violation). This
-    backtests the macro+technical signal in isolation; a real trading
-    decision should still require the Layer 2 PASS that run.py's live path
-    enforces.
+    Layer 2 (fundamentals) defaults to OFF (`use_fundamentals=False`) for
+    backward compatibility with earlier backtests/tests that never seeded
+    fundamentals data -- with it off, every ticker would otherwise get
+    silently REJECTed at Layer 2 (no data = fail) and no trades would ever
+    open. Pass `use_fundamentals=True` once point-in-time fundamentals have
+    actually been backfilled (scripts/fetch_fundamentals.py --historical,
+    via EODHD -- FMP's free tier only exposes current/TTM data, so this
+    wasn't possible before). `fundamentals_universe` sets the relative-
+    strength comparison set; defaults to `tickers` itself (the backtest
+    universe) when omitted.
     """
     cfg = load_config()
     equity = account_equity if account_equity is not None else cfg.account.account_size
 
     histories = {t: _load_full_history(conn, t) for t in tickers}
     dates = _trading_dates(conn, start_date, end_date)
+
+    return_series = {}
+    rs_universe = fundamentals_universe if fundamentals_universe is not None else tickers
+    if use_fundamentals:
+        return_series = _build_return_series(histories, cfg.fundamental.rs_lookback_days)
 
     open_trades: dict[str, _OpenTrade] = {}
     closed_trades: list[dict] = []
@@ -263,8 +350,19 @@ def run_backtest(
                 hist = histories.get(ticker)
                 if hist is None or hist.empty:
                     continue
+
+                if use_fundamentals:
+                    fnd = _fundamental_verdict_fast(conn, ticker, date, return_series, rs_universe, cfg.fundamental)
+                    if fnd["verdict"] != "PASS":
+                        continue
+
                 match = _scan_technical_signal_fast(hist, cfg.technical, date)
                 if match is None:
+                    continue
+                if use_fundamentals and match["setup"] in cfg.fundamental.excluded_setups:
+                    # Data-driven exclusion (config.fundamental.excluded_setups),
+                    # applied identically to the live orchestrator -- see
+                    # FundamentalConfig's comment for the backtest evidence.
                     continue
 
                 risk = compute_trade_plan(

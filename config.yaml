@@ -27,6 +27,8 @@ fundamental:
   avg_volume_min: 500000
   ttl_days: 7
   rs_lookback_days: 252
+  excluded_setups:
+    - BREAKOUT
   universe:
     - SPY
     - AAPL

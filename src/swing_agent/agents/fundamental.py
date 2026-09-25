@@ -7,7 +7,7 @@ from typing import Callable
 from swing_agent.config import load_config
 from swing_agent.data.eodhd import fetch_and_store_fundamentals
 from swing_agent.logging_setup import get_logger
-from swing_agent.storage.db import get_cached_fundamentals
+from swing_agent.storage.db import get_cached_fundamentals, get_fundamentals_as_of
 
 logger = get_logger(__name__)
 
@@ -62,6 +62,94 @@ def calculate_relative_strength(
     return rank / (len(sorted_returns) - 1) * 100
 
 
+def _evaluate_thresholds(cached: dict, relative_strength: float, fcfg) -> tuple[str, list[str], str]:
+    """Shared Layer 2 threshold logic, reused by both the live TTL-cached
+    path (get_fundamental_verdict) and the point-in-time backtest path
+    (get_fundamental_verdict_as_of) so the two can never silently drift
+    apart on what counts as a PASS."""
+    checks = {
+        "roic": (cached.get("roic"), lambda v: v is not None and v > fcfg.roic_min),
+        "fcf_positive": (cached.get("fcf"), lambda v: v is not None and v > 0),
+        "fcf_margin": (cached.get("fcf_margin"), lambda v: v is not None and v > fcfg.fcf_margin_min),
+        "revenue_growth_yoy": (
+            cached.get("revenue_growth_yoy"),
+            lambda v: v is not None and v > fcfg.revenue_growth_min,
+        ),
+        "earnings_growth_yoy": (
+            cached.get("earnings_growth_yoy"),
+            lambda v: v is not None and v > fcfg.earnings_growth_min,
+        ),
+        "relative_strength": (relative_strength, lambda v: v is not None and v > fcfg.relative_strength_min),
+        "price": (cached.get("price"), lambda v: v is not None and v > fcfg.price_min),
+        "avg_daily_volume": (
+            cached.get("avg_daily_volume"),
+            lambda v: v is not None and v > fcfg.avg_volume_min,
+        ),
+    }
+    failed = [name for name, (value, predicate) in checks.items() if not predicate(value)]
+    verdict = "PASS" if not failed else "REJECT"
+    reasoning = (
+        "All fundamental checks passed."
+        if verdict == "PASS"
+        else f"Failed checks: {', '.join(failed)}."
+    )
+    return verdict, failed, reasoning
+
+
+def get_fundamental_verdict_as_of(conn: sqlite3.Connection, ticker: str, as_of_date: str, universe: list[str] | None = None) -> dict:
+    """Point-in-time Layer 2 verdict for BACKTESTING -- no live fetch; reads
+    whatever's already been backfilled via
+    scripts/fetch_fundamentals.py --historical (see data/eodhd.py's
+    fetch_and_store_historical_fundamentals). Returns REJECT (not an
+    exception) if no fundamentals row exists for the ticker as of that date
+    yet (e.g. pre-IPO). `universe` overrides config.fundamental.universe for
+    the relative-strength comparison set -- the backtest engine passes its
+    own (larger) backtest ticker universe.
+
+    Raises FundamentalError only if relative strength itself can't be
+    computed (insufficient price history) -- callers in a backtest loop
+    should catch that and skip the ticker for that day, same as
+    TechnicalError elsewhere in the walk-forward loop.
+    """
+    cfg = load_config()
+    fcfg = cfg.fundamental
+    rs_universe = universe if universe is not None else fcfg.universe
+
+    row = get_fundamentals_as_of(conn, ticker, as_of_date)
+    if row is None:
+        return {
+            "ticker": ticker,
+            "verdict": "REJECT",
+            "as_of_date": as_of_date,
+            "failed_checks": ["no_fundamentals_data"],
+            "reasoning": "No point-in-time fundamentals data available as of this date.",
+            "roic": None, "fcf": None, "fcf_margin": None,
+            "revenue_growth_yoy": None, "earnings_growth_yoy": None,
+            "relative_strength": None, "price": None, "avg_daily_volume": None,
+        }
+
+    relative_strength = calculate_relative_strength(
+        conn, ticker, rs_universe, as_of_date, lookback_days=fcfg.rs_lookback_days
+    )
+    verdict, failed, reasoning = _evaluate_thresholds(row, relative_strength, fcfg)
+
+    return {
+        "ticker": ticker,
+        "verdict": verdict,
+        "roic": row.get("roic"),
+        "fcf": row.get("fcf"),
+        "fcf_margin": row.get("fcf_margin"),
+        "revenue_growth_yoy": row.get("revenue_growth_yoy"),
+        "earnings_growth_yoy": row.get("earnings_growth_yoy"),
+        "relative_strength": relative_strength,
+        "price": row.get("price"),
+        "avg_daily_volume": row.get("avg_daily_volume"),
+        "failed_checks": failed,
+        "reasoning": reasoning,
+        "as_of_date": as_of_date,
+    }
+
+
 def get_fundamental_verdict(
     conn: sqlite3.Connection,
     ticker: str,
@@ -99,34 +187,7 @@ def get_fundamental_verdict(
     relative_strength = calculate_relative_strength(
         conn, ticker, fcfg.universe, resolved_date, lookback_days=fcfg.rs_lookback_days
     )
-
-    checks = {
-        "roic": (cached.get("roic"), lambda v: v is not None and v > fcfg.roic_min),
-        "fcf_positive": (cached.get("fcf"), lambda v: v is not None and v > 0),
-        "fcf_margin": (cached.get("fcf_margin"), lambda v: v is not None and v > fcfg.fcf_margin_min),
-        "revenue_growth_yoy": (
-            cached.get("revenue_growth_yoy"),
-            lambda v: v is not None and v > fcfg.revenue_growth_min,
-        ),
-        "earnings_growth_yoy": (
-            cached.get("earnings_growth_yoy"),
-            lambda v: v is not None and v > fcfg.earnings_growth_min,
-        ),
-        "relative_strength": (relative_strength, lambda v: v > fcfg.relative_strength_min),
-        "price": (cached.get("price"), lambda v: v is not None and v > fcfg.price_min),
-        "avg_daily_volume": (
-            cached.get("avg_daily_volume"),
-            lambda v: v is not None and v > fcfg.avg_volume_min,
-        ),
-    }
-
-    failed = [name for name, (value, predicate) in checks.items() if not predicate(value)]
-    verdict = "PASS" if not failed else "REJECT"
-    reasoning = (
-        "All fundamental checks passed."
-        if verdict == "PASS"
-        else f"Failed checks: {', '.join(failed)}."
-    )
+    verdict, failed, reasoning = _evaluate_thresholds(cached, relative_strength, fcfg)
     logger.info("Fundamental verdict for %s: %s (%s)", ticker, verdict, reasoning)
 
     return {
