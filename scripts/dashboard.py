@@ -1,7 +1,8 @@
 """Streamlit dashboard for the swing trading agent.
 
 Shows the current macro regime, a live-refreshable scan of a watchlist, and
-(if present) the most recent backtest run's metrics.
+(if present) the most recent backtest run's metrics, equity curve, and
+per-trade narratives.
 
 Usage:
     streamlit run scripts/dashboard.py            (local)
@@ -18,6 +19,8 @@ FMP_API_KEY resolution: read from the environment as usual for local runs
 falls back to Streamlit's secrets manager (st.secrets["FMP_API_KEY"]) so a
 Streamlit Community Cloud deployment can supply it via Settings -> Secrets
 without an .env file (which never leaves your machine / is gitignored).
+
+Theming lives in .streamlit/config.toml (dark, trading-terminal palette).
 """
 from __future__ import annotations
 
@@ -33,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from swing_agent.agents.macro_regime import MacroRegimeError, get_macro_regime
 from swing_agent.agents.orchestrator import get_verdict
+from swing_agent.backtest.narrative import build_trade_narratives
 from swing_agent.config import load_config
 from swing_agent.data.macro import fetch_and_store_macro_series
 from swing_agent.data.prices import fetch_and_store_prices
@@ -51,6 +55,7 @@ st.title("Swing Trading Agent")
 
 cfg = load_config()
 conn = get_connection(cfg.data.db_path)
+scans_dir = Path("data/scans")
 
 with st.sidebar:
     st.header("Watchlist")
@@ -107,58 +112,116 @@ if st.session_state.get("fetch_warnings"):
         for w in st.session_state["fetch_warnings"]:
             st.warning(w)
 
-st.header("Macro Regime")
-try:
-    macro = get_macro_regime(conn)
-    cols = st.columns(4)
-    cols[0].metric("Regime", macro["regime"])
-    cols[1].metric("Size Modifier", f"{macro['position_size_modifier']}x")
-    cols[2].metric("SPY / 200MA", f"{macro['spy_close']:.2f} / {macro['spy_200ma']:.2f}")
-    cols[3].metric("VIX", f"{macro['vix']:.2f}")
-    st.caption(macro["reasoning"])
-except MacroRegimeError:
-    st.info("No macro data yet -- click **Refresh scan** in the sidebar to fetch it.")
+tab_scan, tab_backtest, tab_journal = st.tabs(["Macro & Scan", "Backtest", "Trade Journal"])
 
-st.header("Watchlist Scan")
-scans_dir = Path("data/scans")
-scan_results = st.session_state.get("scan_results")
-if scan_results is None:
-    scan_files = sorted(scans_dir.glob("scan_*.json")) if scans_dir.exists() else []
-    if scan_files:
-        scan_results = json.loads(scan_files[-1].read_text(encoding="utf-8"))
-        st.caption(f"Source: {scan_files[-1].name} (last scripts/daily_scan.py run)")
+with tab_scan:
+    st.subheader("Macro Regime")
+    with st.container(border=True):
+        try:
+            macro = get_macro_regime(conn)
+            cols = st.columns(4)
+            cols[0].metric("Regime", macro["regime"])
+            cols[1].metric("Size Modifier", f"{macro['position_size_modifier']}x")
+            cols[2].metric("SPY / 200MA", f"{macro['spy_close']:.2f} / {macro['spy_200ma']:.2f}")
+            cols[3].metric("VIX", f"{macro['vix']:.2f}")
+            st.caption(macro["reasoning"])
+        except MacroRegimeError:
+            st.info("No macro data yet -- click **Refresh scan** in the sidebar to fetch it.")
 
-if scan_results is None:
-    st.info("No scan results yet. Click **Refresh scan** in the sidebar, or run `python scripts/daily_scan.py` locally.")
-else:
-    rows = []
-    for r in scan_results:
-        row = {"ticker": r["ticker"], "verdict": r["verdict"]}
-        if r["verdict"] == "APPROVE":
-            risk = r["risk"]
-            row.update({
-                "setup": r["technical"]["setup"], "entry": risk["entry"],
-                "stop": risk["stop"], "shares": risk["shares"],
-            })
-        else:
-            row["reject_layer"] = r.get("reject_layer")
-            row["reasoning"] = r.get("reasoning")
-        rows.append(row)
-    st.dataframe(pd.DataFrame(rows), width="stretch")
+    st.subheader("Watchlist Scan")
+    scan_results = st.session_state.get("scan_results")
+    if scan_results is None:
+        scan_files = sorted(scans_dir.glob("scan_*.json")) if scans_dir.exists() else []
+        if scan_files:
+            scan_results = json.loads(scan_files[-1].read_text(encoding="utf-8"))
+            st.caption(f"Source: {scan_files[-1].name} (last scripts/daily_scan.py run)")
+
+    if scan_results is None:
+        st.info("No scan results yet. Click **Refresh scan** in the sidebar, or run `python scripts/daily_scan.py` locally.")
+    else:
+        rows = []
+        for r in scan_results:
+            row = {"ticker": r["ticker"], "verdict": r["verdict"]}
+            if r["verdict"] == "APPROVE":
+                risk = r["risk"]
+                row.update({
+                    "setup": r["technical"]["setup"], "entry": risk["entry"],
+                    "stop": risk["stop"], "shares": risk["shares"],
+                })
+            else:
+                row["reject_layer"] = r.get("reject_layer")
+                row["reasoning"] = r.get("reasoning")
+            rows.append(row)
+        scan_df = pd.DataFrame(rows)
+        styled = scan_df.style.map(
+            lambda v: "color: #0ca30c" if v == "APPROVE" else ("color: #d03b3b" if v == "REJECT" else ""),
+            subset=["verdict"],
+        )
+        st.dataframe(styled, width="stretch")
 
 conn.close()
 
-st.header("Backtest")
-st.caption("Run `python scripts/run_backtest.py --start ... --end ... --json > data/scans/backtest_latest.json` to populate this section.")
 backtest_path = scans_dir / "backtest_latest.json"
-if backtest_path.exists():
-    payload = json.loads(backtest_path.read_text(encoding="utf-8"))
-    metrics = payload["metrics"]
-    cols = st.columns(4)
-    cols[0].metric("Trades", metrics["num_trades"])
-    cols[1].metric("Win Rate", f"{metrics['win_rate']:.1f}%" if metrics["win_rate"] is not None else "N/A")
-    cols[2].metric("Avg R", f"{metrics['avg_r']:.2f}" if metrics["avg_r"] is not None else "N/A")
-    cols[3].metric("Max DD", f"{metrics['max_drawdown_pct']:.1f}%" if metrics["max_drawdown_pct"] is not None else "N/A")
-    st.dataframe(pd.DataFrame(payload["trades"]), width="stretch")
-else:
-    st.info("No backtest results found yet.")
+
+with tab_backtest:
+    st.caption(
+        "Populate this tab with: "
+        "`python scripts/run_backtest.py --start ... --end ... --narratives --json > data/scans/backtest_latest.json`"
+    )
+    if backtest_path.exists():
+        payload = json.loads(backtest_path.read_text(encoding="utf-8"))
+        metrics = payload["metrics"]
+        cols = st.columns(5)
+        cols[0].metric("Trades", metrics["num_trades"])
+        cols[1].metric("Win Rate", f"{metrics['win_rate']:.1f}%" if metrics["win_rate"] is not None else "N/A")
+        cols[2].metric("Avg R", f"{metrics['avg_r']:.2f}" if metrics["avg_r"] is not None else "N/A")
+        cols[3].metric("Max DD", f"{metrics['max_drawdown_pct']:.1f}%" if metrics["max_drawdown_pct"] is not None else "N/A")
+        cols[4].metric("Final Equity", f"${metrics['final_equity']:,.0f}" if metrics.get("final_equity") is not None else "N/A")
+
+        equity_curve = payload.get("equity_curve")
+        if equity_curve:
+            st.subheader("Equity Curve")
+            curve_df = pd.DataFrame(equity_curve).set_index("date")
+            st.line_chart(curve_df["equity"], color="#3987e5")
+
+        st.subheader("Trades")
+        trades_df = pd.DataFrame(payload["trades"])
+        if not trades_df.empty and "r_multiple" in trades_df.columns:
+            display_cols = [c for c in trades_df.columns if c not in ("fills", "entry_indicators", "narrative")]
+            styled_trades = trades_df[display_cols].style.map(
+                lambda v: "color: #0ca30c" if isinstance(v, (int, float)) and v > 0
+                else ("color: #d03b3b" if isinstance(v, (int, float)) and v < 0 else ""),
+                subset=["r_multiple"],
+            )
+            st.dataframe(styled_trades, width="stretch")
+    else:
+        st.info("No backtest results found yet.")
+
+with tab_journal:
+    st.caption("Plain-English win/loss story for each backtest trade -- why it entered, what happened, why it won or lost.")
+    if backtest_path.exists():
+        payload = json.loads(backtest_path.read_text(encoding="utf-8"))
+        trades = payload["trades"]
+        if trades and "narrative" not in trades[0]:
+            trades = build_trade_narratives(trades)
+
+        col1, col2 = st.columns(2)
+        tickers_in_trades = sorted({t["ticker"] for t in trades})
+        ticker_filter = col1.multiselect("Ticker", tickers_in_trades)
+        result_filter = col2.selectbox("Result", ["All", "Wins", "Losses"])
+
+        filtered = trades
+        if ticker_filter:
+            filtered = [t for t in filtered if t["ticker"] in ticker_filter]
+        if result_filter == "Wins":
+            filtered = [t for t in filtered if t["r_multiple"] > 0.05]
+        elif result_filter == "Losses":
+            filtered = [t for t in filtered if t["r_multiple"] < -0.05]
+
+        st.caption(f"{len(filtered)} of {len(trades)} trades")
+        for t in filtered:
+            icon = "🟢" if t["r_multiple"] > 0.05 else ("🔴" if t["r_multiple"] < -0.05 else "⚪")
+            with st.container(border=True):
+                st.markdown(f"{icon} **{t['ticker']}** -- {t.get('narrative', '(no narrative)')}")
+    else:
+        st.info("No backtest results found yet. Run with `--narratives` to populate this tab.")
